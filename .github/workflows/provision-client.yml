@@ -1,0 +1,94 @@
+name: Provision client
+on:
+  workflow_dispatch:
+    inputs:
+      client_slug:
+        required: true
+        description: 'e.g. acme-corp'
+      domain:
+        required: true
+        description: 'e.g. acme.droob.app'
+
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.8.0'
+
+      - name: Terraform fmt check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      # Shared stack first: the tenant's SQL user + password secret, pgbouncer
+      # credential map, SSL certificate domain, and uptime check all derive
+      # from clients.yaml and must exist before the tenant workspace applies.
+      - name: Apply shared infrastructure (clients.yaml driven)
+        run: |
+          terraform -chdir=terraform/shared init
+          terraform -chdir=terraform/shared apply -auto-approve
+
+      - name: Terraform init
+        run: terraform -chdir=terraform init
+
+      - name: Select or create workspace
+        run: |
+          terraform -chdir=terraform workspace select ${{ inputs.client_slug }} || \
+            terraform -chdir=terraform workspace new ${{ inputs.client_slug }}
+
+      - name: Terraform validate
+        run: terraform -chdir=terraform validate
+
+      - name: Terraform plan
+        run: terraform -chdir=terraform plan -var-file=../clients/${{ inputs.client_slug }}.tfvars -out=tfplan
+
+      - name: Terraform apply
+        # Retry once: tenant jobs reference secrets granted by the shared stack
+        # moments earlier, and Secret Manager IAM is eventually consistent.
+        run: |
+          terraform -chdir=terraform apply tfplan || {
+            echo "Apply failed — retrying once in 30s (IAM propagation lag)"
+            sleep 30
+            terraform -chdir=terraform apply -auto-approve -var-file=../clients/${{ inputs.client_slug }}.tfvars
+          }
+
+      - name: Harden tenant database (least-privilege user) and initialize
+        run: |
+          REGION=$(grep 'region' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
+          PROJECT=$(grep 'gcp_project' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
+          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
+            --region=${REGION:-europe-west1} \
+            --project=${PROJECT:-nomowsoft-poc} \
+            --wait
+          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-init \
+            --region=${REGION:-europe-west1} \
+            --project=${PROJECT:-nomowsoft-poc} \
+            --wait
+          # Re-run db-setup after init: syncs the real Odoo admin credentials
+          # (init leaves admin/admin, which must never reach a public URL)
+          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
+            --region=${REGION:-europe-west1} \
+            --project=${PROJECT:-nomowsoft-poc} \
+            --wait
+
+      - name: Notify
+        run: python scripts/notify.py --client ${{ inputs.client_slug }} --event provisioned
+        env:
+          SMTP_CREDS: '${{ secrets.SMTP_CREDS }}'

@@ -1,0 +1,7 @@
+gcp_project   = "nomowsoft-poc"
+region        = "europe-west1"
+client_slug   = "mac-corp"
+domain        = "mac.droob.app"
+database_name = "mac"
+admin_user    = "admin@mac-corp.com"
+image_url     = "europe-west1-docker.pkg.dev/nomowsoft-poc/odoo-v18-repo/odoo-pooled:latest"

@@ -1,0 +1,45 @@
+# clients/clients.yaml
+common_addon_repo: 'github.com/0xCyberY/Common-18.0.git'
+
+# ── Sellable addon catalog ───────────────────────────────────────────────────
+# EVERY addon repo the platform offers, keyed by its build-addons/ directory
+# name. The FULL catalog is baked into the pooled image on every build (code
+# plane), so selling an addon to a client never requires an image rebuild —
+# per-client visibility/install is enforced at runtime by the
+# addon_entitlement platform module from the ODOO_ENTITLEMENTS env var, which
+# terraform/shared renders from each client's addon_repos below (entitlement
+# plane). Adding a NEW catalog entry IS a product release: deploy-fleet must
+# run so the code lands in the image.
+# NOTE: the key 'common' is reserved (the common_addon_repo clone dir).
+catalog:
+  repo-hr:
+    repo:   'github.com/0xCyberY/Human-Resources-18.0.git'
+    branch: main
+
+clients:
+  acme-corp:
+    # database is named after the subdomain (dbfilter ^(%d|%h)$): acme.droob.app → acme
+    domain:      acme.droob.app
+    region:      europe-west1
+    database:    acme
+    db_user:     acme_production2
+    gcp_project: nomowsoft-poc
+    # Catalog keys this client is entitled to (billing source of truth).
+    # Selling an addon = add its key here + `terraform -chdir=terraform/shared apply`.
+    addon_repos: [repo-hr]
+
+  beta-corp:
+    domain:      beta.droob.app
+    region:      europe-west1
+    database:    beta
+    db_user:     beta_production
+    gcp_project: nomowsoft-poc
+    addon_repos: []
+
+  mac-corp:
+    domain:      mac.droob.app
+    region:      europe-west1
+    database:    mac
+    db_user:     mac_production
+    gcp_project: nomowsoft-poc
+    addon_repos: [repo-hr]

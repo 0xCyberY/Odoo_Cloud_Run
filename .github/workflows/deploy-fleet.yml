@@ -1,0 +1,160 @@
+name: Deploy fleet (build → migrate → canary)
+# v2 Fix #5 — safe fleet upgrades:
+#   1. Build immutable image (git SHA tag) with the full addon catalog
+#   2. Smoke-test module installation in CI (v2 Fix #6)
+#   3. Deploy a NO-TRAFFIC revision of the pooled service
+#   4. Migrate tenants SEQUENTIALLY via the odoo-fleet-migration Cloud Workflow
+#      (halts on first failure; resumable with the start_from input)
+#   5. Gradual traffic shift 10% → 50% → 100% with health gates + rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_from:
+        required: false
+        default: ''
+        description: 'Resume migration from this client slug (blank = all tenants)'
+
+concurrency:
+  group: deploy-fleet
+  cancel-in-progress: false
+
+env:
+  REGION: europe-west1
+  PROJECT: nomowsoft-poc
+  REPO: odoo-v18-repo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Compute image tags and tenant list
+        id: meta
+        run: |
+          pip install pyyaml -q
+          echo "sha_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import yaml, json
+          with open('clients/clients.yaml') as f:
+              clients = list(yaml.safe_load(f)['clients'])
+          print(f'tenants={json.dumps(clients)}')
+          EOF
+
+      - name: Populate addon catalog from clients.yaml
+        run: python3 scripts/prepare_addons.py --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.ADDONS_GITHUB_TOKEN }}
+
+      - name: Build and push images (immutable SHA tag + latest)
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
+          TAG="${{ steps.meta.outputs.sha_tag }}"
+          gcloud builds submit odoo-v18/ \
+            --tag "${IMG}/odoo-pooled:${TAG}" --project "${PROJECT}"
+          gcloud artifacts docker tags add \
+            "${IMG}/odoo-pooled:${TAG}" "${IMG}/odoo-pooled:latest"
+          gcloud builds submit odoo-v18/pgbouncer/ \
+            --tag "${IMG}/pgbouncer:${TAG}" --project "${PROJECT}"
+          gcloud artifacts docker tags add \
+            "${IMG}/pgbouncer:${TAG}" "${IMG}/pgbouncer:latest"
+
+      - name: Smoke test — platform modules install cleanly (Fix #6)
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/odoo-pooled:${{ steps.meta.outputs.sha_tag }}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" -q
+          docker network create smoke
+          docker run -d --name pg --network smoke \
+            -e POSTGRES_USER=odoo -e POSTGRES_PASSWORD=odoo -e POSTGRES_DB=postgres \
+            postgres:16
+          sleep 10
+          docker run --rm --network smoke \
+            -e DB_HOST=pg -e DB_PORT=5432 -e DB_USER=odoo -e DB_PASSWORD=odoo \
+            "${IMG}" \
+            -d smoke -i base,session_redis,fs_storage,fs_attachment,gcs_attachment_default,addon_entitlement \
+            --stop-after-init
+          docker rm -f pg && docker network rm smoke
+
+      - name: Deploy NO-TRAFFIC revision of the pooled service
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/odoo-pooled:${{ steps.meta.outputs.sha_tag }}"
+          gcloud run services update pooled-odoo \
+            --image "${IMG}" --no-traffic \
+            --region "${REGION}" --project "${PROJECT}"
+
+      - name: Point tenant migration jobs at the new image
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/odoo-pooled:${{ steps.meta.outputs.sha_tag }}"
+          for tenant in $(echo '${{ steps.meta.outputs.tenants }}' | python3 -c 'import sys,json;print(" ".join(json.load(sys.stdin)))'); do
+            for suffix in migration init db-setup; do
+              gcloud run jobs update "${tenant}-odoo-job-${suffix}" \
+                --image "${IMG}" --region "${REGION}" --project "${PROJECT}"
+            done
+          done
+
+      - name: Migrate tenants sequentially (Cloud Workflows, halt-on-fail)
+        run: |
+          gcloud workflows run odoo-fleet-migration \
+            --location "${REGION}" --project "${PROJECT}" \
+            --data '{"tenants": ${{ steps.meta.outputs.tenants }}, "start_from": "${{ inputs.start_from }}"}'
+
+      - name: Gradual traffic shift with health gates (10% → 50% → 100%)
+        run: |
+          set -euo pipefail
+          PREV=$(gcloud run services describe pooled-odoo --region "${REGION}" --project "${PROJECT}" \
+                   --format json | python3 -c 'import sys,json; t=json.load(sys.stdin)["status"]["traffic"]; print(next(x["revisionName"] for x in t if x.get("percent",0)>0))')
+          LATEST=$(gcloud run services describe pooled-odoo --region "${REGION}" --project "${PROJECT}" \
+                   --format 'value(status.latestCreatedRevisionName)')
+          echo "Shifting ${PREV} → ${LATEST}"
+
+          health_gate() {
+            sleep 60
+            for i in $(seq 1 20); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://odoo.droob.app/web/health" || echo 000)
+              if [ "$code" -ge 500 ] || [ "$code" = "000" ]; then
+                echo "Health gate FAILED (HTTP $code) — rolling back to ${PREV}"
+                gcloud run services update-traffic pooled-odoo \
+                  --to-revisions "${PREV}=100" --region "${REGION}" --project "${PROJECT}"
+                exit 1
+              fi
+              sleep 3
+            done
+            echo "Health gate passed"
+          }
+
+          for pct in 10 50 100; do
+            gcloud run services update-traffic pooled-odoo \
+              --to-revisions "${LATEST}=${pct}" --region "${REGION}" --project "${PROJECT}"
+            health_gate
+          done
+
+          # Return to latest=100% mode so future Terraform-driven revisions
+          # (e.g. a new tenant added to the pgbouncer map) serve immediately.
+          gcloud run services update-traffic pooled-odoo \
+            --to-latest --region "${REGION}" --project "${PROJECT}"
+
+      - name: Roll out websocket and cron-runner services
+        run: |
+          IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/odoo-pooled:${{ steps.meta.outputs.sha_tag }}"
+          for svc in websocket-odoo cron-runner-odoo; do
+            gcloud run services update "${svc}" \
+              --image "${IMG}" --region "${REGION}" --project "${PROJECT}"
+          done
+
+      - name: Notify
+        if: always()
+        run: python scripts/notify.py --client fleet --event "deploy-${{ job.status }}"
+        env:
+          SMTP_CREDS: '${{ secrets.SMTP_CREDS }}'

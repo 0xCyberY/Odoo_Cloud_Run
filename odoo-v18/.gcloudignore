@@ -1,0 +1,8 @@
+# Ensure the addon catalog (build-addons/) IS included in the Cloud Build
+# upload for the pooled image. Without a .gcloudignore, gcloud falls back to
+# the repo .gitignore, which excludes odoo-v18/build-addons/* — that would ship
+# an image missing every client's addons. This file overrides that fallback.
+__pycache__/
+*.pyc
+.DS_Store
+pgbouncer/

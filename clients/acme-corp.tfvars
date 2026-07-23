@@ -1,0 +1,7 @@
+gcp_project   = "nomowsoft-poc"
+region        = "europe-west1"
+client_slug   = "acme-corp"
+domain        = "acme.droob.app"
+database_name = "acme"
+admin_user    = "admin@acme-corp.com"
+image_url     = "europe-west1-docker.pkg.dev/nomowsoft-poc/odoo-v18-repo/odoo-pooled:latest"

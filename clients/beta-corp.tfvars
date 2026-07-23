@@ -1,0 +1,7 @@
+gcp_project   = "nomowsoft-poc"
+region        = "europe-west1"
+client_slug   = "beta-corp"
+domain        = "beta.droob.app"
+database_name = "beta"
+admin_user    = "admin@beta-corp.com"
+image_url     = "europe-west1-docker.pkg.dev/nomowsoft-poc/odoo-v18-repo/odoo-pooled:latest"
