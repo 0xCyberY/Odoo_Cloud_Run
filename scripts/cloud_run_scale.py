@@ -40,10 +40,12 @@ if __name__ == "__main__":
     parser.add_argument("--client", required=False, help="Ignored: all clients share the pooled service (pooled-odoo)")
     parser.add_argument("--min-instances", type=int, required=True, choices=[0, 1, 2, 3], help="Target minimum instances")
     parser.add_argument("--region", default=os.environ.get("GCP_REGION", "europe-west1"), help="GCP Region (or set GCP_REGION env var)")
-    parser.add_argument("--project", default=os.environ.get("GCP_PROJECT", "nomowsoft-poc"), help="GCP Project ID (or set GCP_PROJECT env var)")
-    
+    parser.add_argument("--project", default=os.environ.get("GCP_PROJECT"), help="GCP Project ID (or set GCP_PROJECT env var) — required, no hardcoded default")
+
     args = parser.parse_args()
-    
+    if not args.project:
+        parser.error("--project or GCP_PROJECT env var is required")
+
     try:
         scale_service(args.client, args.min_instances, args.region, args.project)
     except Exception as e:

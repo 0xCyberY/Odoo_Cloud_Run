@@ -1,5 +1,5 @@
 # clients/clients.yaml
-common_addon_repo: 'github.com/0xCyberY/Common-18.0.git'
+common_addon_repo: 'github.com/nomowsoft/Common.git'
 
 # ── Sellable addon catalog ───────────────────────────────────────────────────
 # EVERY addon repo the platform offers, keyed by its build-addons/ directory
@@ -12,34 +12,40 @@ common_addon_repo: 'github.com/0xCyberY/Common-18.0.git'
 # run so the code lands in the image.
 # NOTE: the key 'common' is reserved (the common_addon_repo clone dir).
 catalog:
-  repo-hr:
-    repo:   'github.com/0xCyberY/Human-Resources-18.0.git'
-    branch: main
+  Human-Resources:
+    repo:   'github.com/nomowsoft/Human-Resources.git'
+    branch: '18.0'
+  Accounting:
+    repo:   'github.com/nomowsoft/Accounting.git'
+    branch: '18.0'
+  Odoo-Customization-Module:
+    repo:   'github.com/nomowsoft/Odoo-Customization-Module.git'
+    branch: '18.0'
 
 clients:
   acme-corp:
-    # database is named after the subdomain (dbfilter ^(%d|%h)$): acme.droob.app → acme
-    domain:      acme.droob.app
+    # database is named after the subdomain (dbfilter ^(%d|%h)$): acme.nomowsoft.com → acme
+    domain:      acme.nomowsoft.com
     region:      europe-west1
     database:    acme
     db_user:     acme_production2
-    gcp_project: nomowsoft-poc
+    gcp_project: project-b85b49c5-5bdc-48ac-989
     # Catalog keys this client is entitled to (billing source of truth).
     # Selling an addon = add its key here + `terraform -chdir=terraform/shared apply`.
-    addon_repos: [repo-hr]
+    addon_repos: [Human-Resources, Accounting]
 
   beta-corp:
-    domain:      beta.droob.app
+    domain:      beta.nomowsoft.com
     region:      europe-west1
     database:    beta
     db_user:     beta_production
-    gcp_project: nomowsoft-poc
-    addon_repos: []
+    gcp_project: project-b85b49c5-5bdc-48ac-989
+    addon_repos: [Odoo-Customization-Module]
 
   mac-corp:
-    domain:      mac.droob.app
+    domain:      mac.nomowsoft.com
     region:      europe-west1
     database:    mac
     db_user:     mac_production
-    gcp_project: nomowsoft-poc
-    addon_repos: [repo-hr]
+    gcp_project: project-b85b49c5-5bdc-48ac-989
+    addon_repos: [Human-Resources]

@@ -42,7 +42,7 @@ locals {
 
   # Tenant-resolution validation (dbfilter = ^(%d|%h)$ — see entrypoint.sh):
   # every host must match EXACTLY ONE database, either by subdomain first
-  # label (beta.droob.app → beta) or full host (super.droob.com → db of that
+  # label (beta.nomowsoft.com → beta) or full host (super.droob.com → db of that
   # exact name, used when two clients share a first label).
   all_databases = [for name, config in local.clients : config.database]
   host_db_matches = {
@@ -321,7 +321,7 @@ resource "google_compute_global_forwarding_rule" "alb_forwarding_rule" {
 resource "random_id" "cert" {
   byte_length = 3
   keepers = {
-    domains = join(",", concat(["odoo.droob.app"], local.client_domains))
+    domains = join(",", concat(["saas-dev.nomowsoft.com"], local.client_domains))
   }
 }
 
@@ -330,7 +330,7 @@ resource "google_compute_managed_ssl_certificate" "default_cert" {
   project = var.gcp_project
 
   managed {
-    domains = concat(["odoo.droob.app"], local.client_domains)
+    domains = concat(["saas-dev.nomowsoft.com"], local.client_domains)
   }
 
   lifecycle {

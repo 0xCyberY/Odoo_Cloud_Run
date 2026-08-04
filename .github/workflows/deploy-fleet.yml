@@ -21,7 +21,7 @@ concurrency:
 
 env:
   REGION: europe-west1
-  PROJECT: nomowsoft-poc
+  PROJECT: ${{ vars.GCP_PROJECT }}
   REPO: odoo-v18-repo
 
 jobs:
@@ -122,7 +122,7 @@ jobs:
           health_gate() {
             sleep 60
             for i in $(seq 1 20); do
-              code=$(curl -s -o /dev/null -w '%{http_code}' "https://odoo.droob.app/web/health" || echo 000)
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://saas-dev.nomowsoft.com/web/health" || echo 000)
               if [ "$code" -ge 500 ] || [ "$code" = "000" ]; then
                 echo "Health gate FAILED (HTTP $code) — rolling back to ${PREV}"
                 gcloud run services update-traffic pooled-odoo \

@@ -2,7 +2,7 @@
 
 output "alb_ip" {
   value       = google_compute_global_address.alb_ip.address
-  description = "Static IP of the shared ALB — point every tenant domain (and saas.nomowsoft.com) A record here"
+  description = "Static IP of the shared ALB — point every tenant domain (and saas-dev.nomowsoft.com) A record here"
 }
 
 output "sql_private_ip" {

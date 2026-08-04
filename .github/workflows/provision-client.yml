@@ -7,7 +7,7 @@ on:
         description: 'e.g. acme-corp'
       domain:
         required: true
-        description: 'e.g. acme.droob.app'
+        description: 'e.g. acme.nomowsoft.com'
 
 concurrency:
   group: terraform-apply
@@ -20,6 +20,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # Repo variable (Settings → Actions → Variables), not hardcoded — this
+      # is the project the shared stack + terraform state bucket live in.
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      TF_VAR_gcp_project: ${{ vars.GCP_PROJECT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,11 +47,11 @@ jobs:
       # from clients.yaml and must exist before the tenant workspace applies.
       - name: Apply shared infrastructure (clients.yaml driven)
         run: |
-          terraform -chdir=terraform/shared init
+          terraform -chdir=terraform/shared init -backend-config="bucket=${GCP_PROJECT}-tf-state"
           terraform -chdir=terraform/shared apply -auto-approve
 
       - name: Terraform init
-        run: terraform -chdir=terraform init
+        run: terraform -chdir=terraform init -backend-config="bucket=${GCP_PROJECT}-tf-state"
 
       - name: Select or create workspace
         run: |
@@ -73,19 +78,23 @@ jobs:
         run: |
           REGION=$(grep 'region' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
           PROJECT=$(grep 'gcp_project' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
+          if [ -z "$PROJECT" ]; then
+            echo "::error::no gcp_project found in clients/${{ inputs.client_slug }}.tfvars"
+            exit 1
+          fi
           gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
-            --region=${REGION:-europe-west1} \
-            --project=${PROJECT:-nomowsoft-poc} \
+            --region="${REGION:-europe-west1}" \
+            --project="${PROJECT}" \
             --wait
           gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-init \
-            --region=${REGION:-europe-west1} \
-            --project=${PROJECT:-nomowsoft-poc} \
+            --region="${REGION:-europe-west1}" \
+            --project="${PROJECT}" \
             --wait
           # Re-run db-setup after init: syncs the real Odoo admin credentials
           # (init leaves admin/admin, which must never reach a public URL)
           gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
-            --region=${REGION:-europe-west1} \
-            --project=${PROJECT:-nomowsoft-poc} \
+            --region="${REGION:-europe-west1}" \
+            --project="${PROJECT}" \
             --wait
 
       - name: Notify

@@ -92,11 +92,28 @@ class CloudRunProvisioner:
             raise ValueError(f"Client '{self.client_name}' not defined in clients.yaml")
             
         self.client_config = self.full_config["clients"][self.client_name]
-        self.gcp_project = self.client_config.get("gcp_project", "nomowsoft-poc")
+        if not self.client_config.get("gcp_project"):
+            raise ValueError(f"Client '{self.client_name}' has no gcp_project set in clients.yaml")
+        self.gcp_project = self.client_config["gcp_project"]
+        self.tf_state_bucket = f"{self.gcp_project}-tf-state"
         self.region = self.client_config.get("region", "europe-west1")
         self.domain = self.client_config.get("domain")
         self.database_name = self.client_config.get("database")
-        
+
+    def _sync_adc_quota_project(self):
+        """Application Default Credentials carry their own "quota project",
+        separate from gcloud's active project — GCS/other API calls get
+        billed and quota-attributed to whichever project ADC says, not
+        necessarily self.gcp_project. A stale ADC quota project (e.g. left
+        over from a previous `gcloud auth application-default login` on a
+        different project) causes a confusing "billing account not in good
+        standing" error unrelated to self.gcp_project's actual billing state.
+        """
+        run_cmd(
+            ["gcloud", "auth", "application-default", "set-quota-project", self.gcp_project],
+            capture_output=False,
+        )
+
     def execute_shared_terraform(self):
         """Applies terraform/shared first: tenant SQL user + password secret,
         pgbouncer credential map, SSL certificate domains, and uptime checks all
@@ -112,39 +129,89 @@ class CloudRunProvisioner:
             log_info(f"[DRY-RUN] Would run: terraform init && terraform apply -auto-approve in {shared_dir}")
             return
 
-        run_cmd(["terraform", "init"], cwd=shared_dir, capture_output=False)
+        self._sync_adc_quota_project()
+        run_cmd(
+            ["terraform", "init", "-reconfigure", f"-backend-config=bucket={self.tf_state_bucket}"],
+            cwd=shared_dir, capture_output=False,
+        )
         run_cmd(["terraform", "apply", "-auto-approve"], cwd=shared_dir, capture_output=False)
         log_success("Shared infrastructure is up to date (tenant DB user, pgbouncer map, SSL cert, monitoring).")
+
+    def _reconcile_database_drift(self, tf_dir, tf_vars_file):
+        """Defensive guard: the tenant database can end up physically present
+        in Cloud SQL while missing from this workspace's Terraform state —
+        e.g. a project migration where the state bucket moved but the shared
+        Cloud SQL instance (and its databases) carried over, or a state reset
+        after a partial prior run. Left alone, `apply` fails with "database
+        already exists" on google_sql_database.client. Detect that drift and
+        import the resource before apply runs, so apply sees a clean no-op
+        instead of erroring.
+        """
+        resource_addr = "module.cloud_sql_db.google_sql_database.client"
+        state_res = run_cmd(["terraform", "state", "list"], cwd=tf_dir, check=False)
+        if resource_addr in state_res.stdout:
+            return  # already tracked, nothing to reconcile
+
+        instance_res = run_cmd(
+            ["gcloud", "sql", "instances", "list", f"--project={self.gcp_project}", "--format=value(name)"],
+            check=False,
+        )
+        instance_name = instance_res.stdout.strip().split("\n")[0].strip()
+        if not instance_name:
+            return  # shared instance not up yet — let apply surface the real error
+
+        exists_res = run_cmd(
+            ["gcloud", "sql", "databases", "describe", self.database_name,
+             f"--instance={instance_name}", f"--project={self.gcp_project}"],
+            check=False,
+        )
+        if exists_res.returncode != 0:
+            return  # database genuinely doesn't exist yet — normal create path
+
+        log_warn(f"Database '{self.database_name}' already exists on Cloud SQL instance "
+                 f"'{instance_name}' but isn't tracked in the '{self.client_name}' workspace "
+                 "state — importing it before apply instead of letting create collide.")
+        run_cmd(
+            ["terraform", "import", f"-var-file={tf_vars_file}", resource_addr,
+             f"{self.gcp_project}/{instance_name}/{self.database_name}"],
+            cwd=tf_dir, capture_output=False,
+        )
 
     def execute_terraform(self):
         """Runs Terraform to provision databases, buckets, and Cloud Run service."""
         log_info("--- Step 2: Running Terraform Provisioning ---")
-        
+
         tf_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "terraform"
         )
-        
-        # Select or create Terraform Workspace
-        log_info(f"Initializing Terraform and selecting workspace '{self.client_name}'...")
-        if not self.dry_run:
-            run_cmd(["terraform", "init"], cwd=tf_dir, capture_output=False)
-            
-            # Check if workspace exists
-            ws_list_res = run_cmd(["terraform", "workspace", "list"], cwd=tf_dir)
-            workspaces = [w.strip().replace("*", "").strip() for w in ws_list_res.stdout.split("\n") if w.strip()]
-            
-            if self.client_name in workspaces:
-                run_cmd(["terraform", "workspace", "select", self.client_name], cwd=tf_dir, capture_output=False)
-            else:
-                run_cmd(["terraform", "workspace", "new", self.client_name], cwd=tf_dir, capture_output=False)
-        
+
         # Assemble terraform apply arguments
         tf_vars_file = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "clients", f"{self.client_name}.tfvars"
         )
-        
+
+        # Select or create Terraform Workspace
+        log_info(f"Initializing Terraform and selecting workspace '{self.client_name}'...")
+        if not self.dry_run:
+            self._sync_adc_quota_project()
+            run_cmd(
+                ["terraform", "init", "-reconfigure", f"-backend-config=bucket={self.tf_state_bucket}"],
+                cwd=tf_dir, capture_output=False,
+            )
+
+            # Check if workspace exists
+            ws_list_res = run_cmd(["terraform", "workspace", "list"], cwd=tf_dir)
+            workspaces = [w.strip().replace("*", "").strip() for w in ws_list_res.stdout.split("\n") if w.strip()]
+
+            if self.client_name in workspaces:
+                run_cmd(["terraform", "workspace", "select", self.client_name], cwd=tf_dir, capture_output=False)
+            else:
+                run_cmd(["terraform", "workspace", "new", self.client_name], cwd=tf_dir, capture_output=False)
+
+            self._reconcile_database_drift(tf_dir, tf_vars_file)
+
         tf_apply_cmd = [
             "terraform", "apply", "-auto-approve",
             f"-var-file={tf_vars_file}"

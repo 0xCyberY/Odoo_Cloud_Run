@@ -12,7 +12,7 @@ Rules (dbfilter = ^(%d|%h)$ — Option A hybrid):
   R3  database names are unique across clients
   R4  db_user names are unique across clients
   R5  every domain resolves to EXACTLY ONE database:
-        db == first label of the host (www. stripped)  e.g. beta.droob.app → beta
+        db == first label of the host (www. stripped)  e.g. beta.nomowsoft.com → beta
         OR db == full host                              e.g. super.droob.com → super.droob.com
       Zero matches → tenant unreachable. Two+ matches → ambiguous (data hazard).
   R6  catalog entries are well-formed: each has a 'repo'; the key 'common' is
@@ -116,6 +116,12 @@ def validate(config, raw_text=None):
             errors.append("R6 catalog key 'common' is reserved for common_addon_repo")
         if not isinstance(spec, dict) or not spec.get("repo"):
             errors.append(f"R6 catalog entry '{key}' must define a 'repo'")
+        if isinstance(spec, dict) and "branch" in spec and not isinstance(spec["branch"], str):
+            errors.append(
+                f"R6 catalog entry '{key}' has a non-string 'branch' ({spec['branch']!r}) — "
+                "YAML parses an unquoted version like 18.0 as a float; quote it "
+                "(branch: '18.0')"
+            )
 
     # R7 — client entitlements reference catalog keys
     for slug, c in clients.items():

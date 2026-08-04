@@ -10,7 +10,7 @@ closed (see the [Fixes legend](#15-fixes-legend--v1-weakness--v2-solution)).
 Full diagram: [`docs/architecture-v2.svg`](docs/architecture-v2.svg)
 
 ```
-Internet → tenant domains (acme.droob.app, beta.droob.app, ...)
+Internet → tenant domains (acme.nomowsoft.com, beta.nomowsoft.com, ...)
    │
    ▼
 Global External Application Load Balancer  (static IP, Google-managed SSL)
@@ -116,21 +116,21 @@ an addon to a client is then purely an entitlement change (runtime), never an
 image rebuild (§10 upgrade model, §12 step 3):
 
 ```yaml
-common_addon_repo: 'github.com/0xCyberY/Common-18.0.git'      # → build-addons/common/
+common_addon_repo: 'github.com/nomowsoft/Common.git'      # → build-addons/common/
 catalog:                       # EVERY sellable repo — all baked into the image
-  repo-hr:                                                    # → build-addons/repo-hr/
-    repo:   'github.com/0xCyberY/Human-Resources-18.0.git'
-    branch: main
+  Human-Resources:                                        # → build-addons/Human-Resources/
+    repo:   'github.com/nomowsoft/Human-Resources.git'
+    branch: '18.0'
 clients:
   mac-corp:
-    addon_repos: [repo-hr]     # ← entitlement: catalog keys this client pays for
+    addon_repos: [Human-Resources]   # ← entitlement: catalog keys this client pays for
 ```
 
 To populate it locally:
 
 ```bash
 GITHUB_TOKEN=<pat> python3 scripts/prepare_addons.py --clean
-ls odoo-v18/build-addons/     # → common/  repo-hr/
+ls odoo-v18/build-addons/     # → common/  Human-Resources/  Accounting/  Odoo-Customization-Module/
 ```
 
 CI runs this automatically before `gcloud builds submit` using the
@@ -152,8 +152,10 @@ The Dockerfile assembles four layers; `entrypoint.sh` builds `addons_path` from 
 |---|---|---|
 | `/opt/extra-addons` | `session_redis`, `fs_storage`, `fs_attachment`, `server_environment` | Cloned from camptocamp/OCA 18.0 during `docker build` (NOT `/mnt/extra-addons` — that's a VOLUME in the odoo base image; build-time writes there are discarded) |
 | `/mnt/platform-addons` | `gcs_attachment_default`, `platform_dblist` | `COPY addons/` |
-| `/mnt/custom-shared/common` | Your Common-18.0 modules | `COPY build-addons/` |
-| `/mnt/custom-shared/repo-hr` | Your Human-Resources-18.0 modules | `COPY build-addons/` |
+| `/mnt/custom-shared/common` | Your Common modules | `COPY build-addons/` |
+| `/mnt/custom-shared/Human-Resources` | Your Human-Resources modules | `COPY build-addons/` |
+| `/mnt/custom-shared/Accounting` | Your Accounting modules | `COPY build-addons/` |
+| `/mnt/custom-shared/Odoo-Customization-Module` | Your Odoo-Customization-Module modules | `COPY build-addons/` |
 | `/usr/lib/python3/dist-packages/odoo/addons` | Odoo core | Base image `odoo:18.0` |
 
 The entrypoint **auto-discovers every subdirectory** of `/mnt/custom-shared/`,
@@ -246,7 +248,7 @@ db-setup job, which runs `/db-setup.sh` directly — it's pure `psql`, no Odoo.
 
 ## 4. Life of a Request
 
-What happens when a user opens `https://acme.droob.app/web`:
+What happens when a user opens `https://acme.nomowsoft.com/web`:
 
 1. **DNS** → the tenant's A record points at the shared ALB static IP
    (managed per tenant by Terraform when `manage_dns = true`).
@@ -261,7 +263,7 @@ What happens when a user opens `https://acme.droob.app/web`:
    else → `pooled-odoo`. Both services only accept traffic *from the load
    balancer* (`ingress = INTERNAL_LOAD_BALANCER`) — their `run.app` URLs are
    not reachable from the internet.
-6. **Odoo (pooled)** sees `Host: acme.droob.app`; `dbfilter = ^(%d|%h)$` maps the
+6. **Odoo (pooled)** sees `Host: acme.nomowsoft.com`; `dbfilter = ^(%d|%h)$` maps the
    hostname to exactly one database (see the naming rules below). The session
    cookie is looked up in **Redis**, so any instance can serve any request
    (instances are stateless).
@@ -280,7 +282,7 @@ a request matches a database named either way:
 
 | Request Host | Matches a DB named | Convention |
 |---|---|---|
-| `beta.droob.app` | `beta` | Normal case: DB named after the subdomain |
+| `beta.nomowsoft.com` | `beta` | Normal case: DB named after the subdomain |
 | `example.com` | `example` | Apex domains: first label works the same |
 | `super.droob.com` + `super.example.com` | `super.droob.com` / `super.example.com` | First-label **collision**: both DBs use the full domain; a DB named just `super` must not exist |
 
@@ -455,16 +457,16 @@ be destroyed while the HTTPS proxy uses them, so every domain change creates
 the replacement first, repoints the proxy, then removes the old cert — always
 resolve the current name via `terraform output -raw ssl_certificate`.
 
-#### The anchor domain `odoo.droob.app` — why it exists
+#### The anchor domain `saas-dev.nomowsoft.com` — why it exists
 
-The certificate's domain list is `["odoo.droob.app"] + <all client domains>`.
+The certificate's domain list is `["saas-dev.nomowsoft.com"] + <all client domains>`.
 The anchor belongs to no client and matches no database — visiting it in a
 browser shows "The database manager has been disabled by the administrator",
 which is **by design** (zero-match host + `list_db = False`, isolation gate 3
 in §4). It exists for machines, not humans:
 
 1. **Deploy-fleet's canary health gate probes it.** Every traffic shift
-   (10% → 50% → 100%) is gated on `https://odoo.droob.app/web/health` —
+   (10% → 50% → 100%) is gated on `https://saas-dev.nomowsoft.com/web/health` —
    `/web/health` is database-independent, so it works on a host with no DB.
    This exercises the full production path (DNS → cert → ALB → Cloud Armor →
    pooled service) through a domain that **no customer owns**: probing a
@@ -481,7 +483,7 @@ in §4). It exists for machines, not humans:
 
 Do **not** remove it from the cert, and keep its A record pointing at the ALB.
 If the error page shown to human visitors is a concern, add an ALB host rule
-redirecting `odoo.droob.app` (all paths except `/web/health`) to a landing
+redirecting `saas-dev.nomowsoft.com` (all paths except `/web/health`) to a landing
 page — cosmetic only.
 
 Notable variables (`terraform/shared/variables.tf`):
@@ -606,13 +608,17 @@ init) and of tearing down a tenant workspace.
 
 Required GitHub secrets: `GCP_WORKLOAD_IDENTITY_PROVIDER`,
 `GCP_SERVICE_ACCOUNT`, `ADDONS_GITHUB_TOKEN` (read-only PAT for the private
-addon repos), `SMTP_CREDS`.
+addon repos), `SMTP_CREDS`. Required GitHub repo **variable** (Settings →
+Actions → Variables, not a secret — it's just a project ID): `GCP_PROJECT`.
+Neither the terraform backends nor these workflows hardcode a project or
+state bucket — `GCP_PROJECT` and `<GCP_PROJECT>-tf-state` are the single
+source of truth for CI, matching `scripts/tf.sh` locally.
 
 ---
 
 ## 11. Deployment Runbook — Clean GCP Project, Manual, Step by Step
 
-Written for a **freshly cleaned project** (`nomowsoft-poc`, nothing in it).
+Written for a **freshly cleaned project** (`project-b85b49c5-5bdc-48ac-989`, nothing in it).
 Every command runs from the **repo root** in your terminal. Phases must run in
 order; each phase says what to expect and how to verify before moving on.
 
@@ -621,13 +627,25 @@ order; each phase says what to expect and how to verify before moving on.
 Required locally: `gcloud`, Terraform ≥ 1.8, Python 3.9+, git.
 
 ```bash
-export PROJECT=nomowsoft-poc
+export PROJECT=project-b85b49c5-5bdc-48ac-989
 export REGION=europe-west1
 
 gcloud auth login
 gcloud auth application-default login     # Terraform uses these credentials
 gcloud config set project $PROJECT
+gcloud auth application-default set-quota-project $PROJECT
 ```
+
+The last line matters even if you've done `application-default login` before:
+ADC has its own **quota project**, separate from `gcloud config`'s active
+project — GCS/API calls get billed and quota-attributed to whichever project
+ADC says, not necessarily `$PROJECT`. A stale ADC quota project (e.g. left
+over from a previous login against a different project) surfaces as a
+`UserProjectAccountProblem` / "billing account not in good standing" error
+that has nothing to do with `$PROJECT`'s own billing — confusing to debug.
+`scripts/tf.sh` and `scripts/provision.py` re-sync this automatically on
+every run, so this only matters if you're invoking `terraform`/`gcloud`
+directly instead of through those wrappers.
 
 ### Phase 1 — Enable the required APIs (one time, ~1 min)
 
@@ -645,8 +663,11 @@ Give it a minute after this returns — API activation is eventually consistent.
 
 ### Phase 2 — Terraform state bucket (one time)
 
-The backends (`terraform/backend.tf`, `terraform/shared/providers.tf`) expect
-`gs://nomowsoft-poc-tf-state`. Recreate it:
+Neither backend (`terraform/backend.tf`, `terraform/shared/providers.tf`)
+hardcodes a bucket — both are partial configs, so `scripts/tf.sh` (used for
+every `terraform` invocation from here on) supplies `-backend-config` at
+`init` time from whatever project `gcloud` currently has active, following
+the convention `<project>-tf-state`. Create that bucket once per project:
 
 ```bash
 gcloud storage buckets create gs://${PROJECT}-tf-state \
@@ -662,7 +683,7 @@ python3 -m venv .venv && .venv/bin/pip install -q pyyaml
 
 # Clone common + all client addon repos into odoo-v18/build-addons/
 GITHUB_TOKEN=<your-github-pat> .venv/bin/python scripts/prepare_addons.py --clean
-ls odoo-v18/build-addons/                            # expect: common/  repo-hr/
+ls odoo-v18/build-addons/                            # expect: common/  Human-Resources/  Accounting/  Odoo-Customization-Module/
 ```
 
 ### Phase 4 — Artifact Registry repo + images
@@ -672,8 +693,8 @@ registry itself is a Terraform resource — so create **just the registry** firs
 with a targeted apply, then build:
 
 ```bash
-terraform -chdir=terraform/shared init
-terraform -chdir=terraform/shared apply \
+scripts/tf.sh shared init
+scripts/tf.sh shared apply \
   -target=google_artifact_registry_repository.odoo_repo
 
 # On a fresh project, grant Cloud Build's runtime SA push access (one time)
@@ -702,9 +723,9 @@ certificate, the three Cloud Run services with pgbouncer sidecars, per-tenant
 SQL users + secrets, Cloud Tasks queue, the migration Workflow, monitoring.
 
 ```bash
-terraform -chdir=terraform/shared plan     # review: ~60+ resources, no destroys
-terraform -chdir=terraform/shared apply
-terraform -chdir=terraform/shared output   # note alb_ip for Phase 6
+scripts/tf.sh shared plan     # review: ~60+ resources, no destroys
+scripts/tf.sh shared apply
+scripts/tf.sh shared output   # note alb_ip for Phase 6
 ```
 
 **Immediately after the apply, pause the cron runner until Phase 7 is done:**
@@ -728,7 +749,7 @@ Other expected quirks — both normal:
 
 At your DNS registrar, create **A records → the `alb_ip` output** for **every**
 domain in the certificate — all client domains **plus the platform anchor
-`odoo.droob.app`** (why the anchor exists: see §9).
+`saas-dev.nomowsoft.com`** (why the anchor exists: see §9).
 A Google-managed certificate only turns ACTIVE when **all** of its domains
 resolve to the LB, so one missing record blocks HTTPS for everyone.
 
@@ -737,7 +758,7 @@ resolve to the LB, so one missing record blocks HTTPS for everyone.
 # The cert name embeds a hash of the domain set (rotates on tenant changes),
 # so always resolve it from the Terraform output:
 gcloud compute ssl-certificates describe \
-  "$(terraform -chdir=terraform/shared output -raw ssl_certificate)" --global \
+  "$(scripts/tf.sh shared output -raw ssl_certificate)" --global \
   --format='yaml(managed.status, managed.domainStatus)'
 ```
 
@@ -786,19 +807,19 @@ gcloud secrets versions access latest --secret=acme-corp-admin-password; echo
 gcloud run services list --region $REGION      # pooled-odoo, websocket-odoo, cron-runner-odoo
 
 # Health end-to-end through the ALB (after cert is ACTIVE)
-curl -sI https://acme.droob.app/web/health       # expect HTTP/2 200
-curl -sI https://beta.droob.app/web/health
-curl -sI https://mac.droob.app/web/health
+curl -sI https://acme.nomowsoft.com/web/health       # expect HTTP/2 200
+curl -sI https://beta.nomowsoft.com/web/health
+curl -sI https://mac.nomowsoft.com/web/health
 
 # Cron runner picked up the tenant DBs? (errors should have stopped)
 gcloud run services logs read cron-runner-odoo --region $REGION --limit 30
 
-# Log in at https://acme.droob.app/web with the Phase-7 credentials, then
+# Log in at https://acme.nomowsoft.com/web with the Phase-7 credentials, then
 # upload any attachment and confirm it lands in GCS:
 gcloud storage ls -r gs://$PROJECT-acme-corp-odoo-attachments/ | head
 
 # Websocket path routed? (400/upgrade-required from Odoo = correctly routed)
-curl -sI https://acme.droob.app/websocket
+curl -sI https://acme.nomowsoft.com/websocket
 ```
 
 Also check Cloud Console → Monitoring → Uptime checks: three green checks.
@@ -806,7 +827,7 @@ Also check Cloud Console → Monitoring → Uptime checks: three green checks.
 ### Phase 9 — Turn on alerting (recommended) & CI (optional)
 
 ```bash
-terraform -chdir=terraform/shared apply -var alert_email=you@example.com
+scripts/tf.sh shared apply -var alert_email=you@example.com
 ```
 
 For GitHub Actions (fleet upgrades via `deploy-fleet.yml`), configure repo
@@ -823,7 +844,7 @@ fleet upgrade is: Phase 3 → Phase 4 build with a new tag → run the
 python3 scripts/cloud_run_scale.py --min-instances 1
 
 # Enable Cloud SQL Regional HA (Fix #1) when tenant revenue justifies ~2x DB cost
-terraform -chdir=terraform/shared apply -var db_availability_type=REGIONAL
+scripts/tf.sh shared apply -var db_availability_type=REGIONAL
 
 # Resume a halted fleet migration from the failed tenant
 gcloud workflows run odoo-fleet-migration --location $REGION \
@@ -840,7 +861,7 @@ follow it rather than improvising with `terraform destroy`.
 
 §11 bootstraps an empty project; this section adds **one tenant to the
 platform that is already running**. Example throughout: `zed-corp` on
-`zed.droob.app`. Commands assume the §11 environment (`$PROJECT`, `$REGION`,
+`zed.nomowsoft.com`. Commands assume the §11 environment (`$PROJECT`, `$REGION`,
 `.venv`, repo root). Active work is ~15 minutes; the SSL certificate wait
 dominates the calendar time.
 
@@ -852,13 +873,13 @@ entry.
 
 ```yaml
   zed-corp:
-    domain:      zed.droob.app
+    domain:      zed.nomowsoft.com
     region:      europe-west1
     database:    zed              # first label of the domain — see §4 naming rules
     db_user:     zed_production
-    gcp_project: nomowsoft-poc
-    addon_repos: [repo-hr]        # entitlements: catalog keys this client pays
-                                  # for (§2) — must exist in the catalog section
+    gcp_project: project-b85b49c5-5bdc-48ac-989
+    addon_repos: [Human-Resources] # entitlements: catalog keys this client pays
+                                   # for (§2) — must exist in the catalog section
 ```
 
 ```bash
@@ -870,13 +891,13 @@ entry.
 Mirror an existing file (`clients/mac-corp.tfvars`):
 
 ```hcl
-gcp_project   = "nomowsoft-poc"
+gcp_project   = "project-b85b49c5-5bdc-48ac-989"
 region        = "europe-west1"
 client_slug   = "zed-corp"
-domain        = "zed.droob.app"
+domain        = "zed.nomowsoft.com"
 database_name = "zed"
 admin_user    = "admin@zed-corp.com"        # the tenant's Odoo admin login
-image_url     = "europe-west1-docker.pkg.dev/nomowsoft-poc/odoo-v18-repo/odoo-pooled:latest"
+image_url     = "europe-west1-docker.pkg.dev/project-b85b49c5-5bdc-48ac-989/odoo-v18-repo/odoo-pooled:latest"
 # manage_dns  = true                        # only if the zone lives in Cloud DNS
 ```
 
@@ -902,8 +923,8 @@ gcloud builds submit odoo-v18/ \
 
 ### Step 4 — Create the DNS A record FIRST
 
-At the registrar: `zed.droob.app` → the ALB IP
-(`terraform -chdir=terraform/shared output -raw alb_ip`).
+At the registrar: `zed.nomowsoft.com` → the ALB IP
+(`scripts/tf.sh shared output -raw alb_ip`).
 
 Do this **before** provisioning: adding a domain **replaces** the managed
 certificate (the name embeds the domain-set hash, §9), and the replacement
@@ -947,12 +968,12 @@ gcloud run services update cron-runner-odoo --min-instances=1 --region $REGION
 ### Step 7 — Verify and hand over
 
 ```bash
-# cert ACTIVE again (incl. zed.droob.app)?
+# cert ACTIVE again (incl. zed.nomowsoft.com)?
 gcloud compute ssl-certificates describe \
-  "$(terraform -chdir=terraform/shared output -raw ssl_certificate)" --global \
+  "$(scripts/tf.sh shared output -raw ssl_certificate)" --global \
   --format='yaml(managed.status, managed.domainStatus)'
 
-curl -sI https://zed.droob.app/web/health      # HTTP/2 200
+curl -sI https://zed.nomowsoft.com/web/health      # HTTP/2 200
 
 # tenant admin credentials for handover:
 gcloud secrets versions access latest --secret=zed-corp-admin-user;     echo
@@ -983,9 +1004,9 @@ no rebuild, no fleet event, other tenants untouched:
 
 ```bash
 # 1. Entitle: add the catalog key to the client's addon_repos in clients.yaml
-#    (e.g. beta-corp: addon_repos: [repo-hr]), commit, then:
+#    (e.g. beta-corp: addon_repos: [Human-Resources]), commit, then:
 .venv/bin/python scripts/validate_clients.py
-terraform -chdir=terraform/shared apply     # rolls ODOO_ENTITLEMENTS onto the services
+scripts/tf.sh shared apply     # rolls ODOO_ENTITLEMENTS onto the services
 
 # 2. Install into their database (the only legitimate install path):
 gcloud run jobs execute beta-corp-odoo-job-migration --region $REGION --wait \
@@ -1060,8 +1081,8 @@ The tenant workspace still *thinks* it manages the database; destroying now
 would fail trying to delete it. Tell state it's gone:
 
 ```bash
-terraform -chdir=terraform workspace select zed-corp
-terraform -chdir=terraform state rm module.cloud_sql_db.google_sql_database.client
+scripts/tf.sh root workspace select zed-corp
+scripts/tf.sh root state rm module.cloud_sql_db.google_sql_database.client
 ```
 
 ### Step 5 — Destroy the tenant workspace
@@ -1070,10 +1091,10 @@ Removes the GCS bucket (**and its contents**), the three Cloud Run Jobs, the
 admin secrets, and the Cloud DNS record if managed:
 
 ```bash
-terraform -chdir=terraform destroy -var-file=../clients/zed-corp.tfvars
+scripts/tf.sh root destroy -var-file=../clients/zed-corp.tfvars
 # or from CI: Actions → "destroy-client" → client_slug=zed-corp
-terraform -chdir=terraform workspace select default
-terraform -chdir=terraform workspace delete zed-corp
+scripts/tf.sh root workspace select default
+scripts/tf.sh root workspace delete zed-corp
 ```
 
 ### Step 6 — Remove the client from the repo
@@ -1089,7 +1110,7 @@ git add -A && git commit    # the yaml history is the offboarding audit trail
 ### Step 7 — Re-apply the shared platform
 
 ```bash
-terraform -chdir=terraform/shared apply
+scripts/tf.sh shared apply
 ```
 
 This atomically removes the tenant's SQL user (safe now — it owns nothing),
@@ -1105,7 +1126,7 @@ new revisions.
 gcloud run services update cron-runner-odoo --min-instances=1 --region $REGION
 ```
 
-- Delete the `zed.droob.app` A record at the registrar (if not Cloud
+- Delete the `zed.nomowsoft.com` A record at the registrar (if not Cloud
   DNS-managed).
 - If no remaining client declares the departed client's addon repo, the next
   image build drops it from the catalog automatically (`prepare_addons.py`
@@ -1162,7 +1183,7 @@ re-learns them the hard way in this or any future project.
 | `odoo -i base` loads **demo data** by default — permanent once committed | fake users in a production tenant | init job passes `--without-demo=all` |
 | Odoo auto-creates DBs named in `db_name` (v15+) — the cron runner spawns empty tenant DBs before provisioning | tenant apply "already exists" | runbook pauses cron-runner during bootstrap (Phase 5→7) |
 | Managed SSL certs are immutable and can't be destroyed while attached to the proxy | replace deadlock on domain change | hashed cert name + `create_before_destroy` |
-| A managed cert only turns ACTIVE when **all** SANs resolve to the LB | one missing A record blocks HTTPS for everyone | runbook Phase 6; anchor domain `odoo.droob.app` in the same DNS zone as tenants |
+| A managed cert only turns ACTIVE when **all** SANs resolve to the LB | one missing A record blocks HTTPS for everyone | runbook Phase 6; anchor domain `saas-dev.nomowsoft.com` in the same DNS zone as tenants |
 | Cloud Run validates secret access at create time; Secret Manager IAM is eventually consistent | "Permission denied on secret" | `depends_on` grants everywhere + 30s retry in `provision.py`/CI |
 | Tenant-owned databases can't be dropped via the Cloud SQL API | offboarding delete fails | documented DROP-as-`odoo_shared` procedure (§13 offboarding, step 3) |
 | Empty `ODOO_SESSION_REDIS_PASSWORD` makes redis-py send `AUTH ""` to a no-auth Memorystore | every request 500s | entrypoint exports the var only when non-empty |

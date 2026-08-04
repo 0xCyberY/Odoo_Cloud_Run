@@ -1,8 +1,7 @@
 # terraform/shared/variables.tf
 variable "gcp_project" {
   type        = string
-  description = "The GCP project ID"
-  default     = "nomowsoft-poc"
+  description = "The GCP project ID (no default — pass explicitly or via TF_VAR_gcp_project, e.g. scripts/tf.sh)"
 }
 
 variable "region" {

@@ -74,7 +74,7 @@ def main():
     # Common shared addons (always entitled for every tenant)
     common = config.get("common_addon_repo")
     if common:
-        clone(common, "main", os.path.join(BUILD_ADDONS, "common"), token)
+        clone(common, "18.0", os.path.join(BUILD_ADDONS, "common"), token)
 
     # Full sellable catalog — every repo, whether or not a client subscribes
     # today. The directory name (catalog key) is the entitlement unit that

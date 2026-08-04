@@ -17,6 +17,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # Repo variable (Settings → Actions → Variables), not hardcoded.
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +35,7 @@ jobs:
           terraform_version: '1.8.0'
 
       - name: Terraform init
-        run: terraform -chdir=terraform init
+        run: terraform -chdir=terraform init -backend-config="bucket=${GCP_PROJECT}-tf-state"
 
       - name: Select workspace
         run: terraform -chdir=terraform workspace select ${{ inputs.client_slug }}

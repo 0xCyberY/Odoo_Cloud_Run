@@ -2,8 +2,7 @@
 
 variable "gcp_project" {
   type        = string
-  description = "The GCP project ID to deploy to"
-  default     = "nomowsoft-poc"
+  description = "The GCP project ID to deploy to (no default — pass explicitly or via TF_VAR_gcp_project, e.g. scripts/tf.sh)"
 }
 
 variable "region" {
