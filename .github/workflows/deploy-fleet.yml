@@ -64,12 +64,13 @@ jobs:
           TAG="${{ steps.meta.outputs.sha_tag }}"
           STAGING="gs://${PROJECT}-cloudbuild-source/source"
           LOGDIR="gs://${PROJECT}-cloudbuild-source/logs"
+          BUILD_SA="projects/${PROJECT}/serviceAccounts/cloudbuild-runner@${PROJECT}.iam.gserviceaccount.com"
           gcloud builds submit odoo-v18/ \
-            --tag "${IMG}/odoo-pooled:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}" --gcs-log-dir="${LOGDIR}"
+            --tag "${IMG}/odoo-pooled:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}" --gcs-log-dir="${LOGDIR}" --service-account="${BUILD_SA}"
           gcloud artifacts docker tags add \
             "${IMG}/odoo-pooled:${TAG}" "${IMG}/odoo-pooled:latest"
           gcloud builds submit odoo-v18/pgbouncer/ \
-            --tag "${IMG}/pgbouncer:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}" --gcs-log-dir="${LOGDIR}"
+            --tag "${IMG}/pgbouncer:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}" --gcs-log-dir="${LOGDIR}" --service-account="${BUILD_SA}"
           gcloud artifacts docker tags add \
             "${IMG}/pgbouncer:${TAG}" "${IMG}/pgbouncer:latest"
 

@@ -855,3 +855,43 @@ resource "google_storage_bucket_iam_member" "github_actions_deployer_cloudbuild_
   role   = "roles/storage.admin"
   member = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
+
+# `gcloud builds submit` submits the build as github_actions_deployer, but the
+# build ITSELF executes as a separate identity — by default the project's
+# default Compute Engine SA (<project_number>-compute@developer.gserviceaccount.com).
+# This project deliberately doesn't grant that default SA extra roles (it has
+# none of our bucket/registry access), which surfaced as "service account
+# ...-compute@developer.gserviceaccount.com does not have access to the
+# bucket". Matching every other purpose-built SA in this stack, use a
+# dedicated execution identity instead of relying on the broad, implicit
+# default. github_actions_deployer's project-wide roles/iam.serviceAccountUser
+# (above) already lets it pass --service-account=this SA to gcloud builds submit.
+resource "google_service_account" "cloudbuild_runner" {
+  account_id   = "cloudbuild-runner"
+  display_name = "Cloud Build execution SA (odoo-pooled / pgbouncer image builds)"
+  project      = var.gcp_project
+}
+
+resource "google_storage_bucket_iam_member" "cloudbuild_runner_source" {
+  bucket = google_storage_bucket.cloudbuild_source.name
+  role   = "roles/storage.admin"
+  member = "serviceAccount:${google_service_account.cloudbuild_runner.email}"
+}
+
+# Repo-scoped, not project-wide: the build only ever needs to push into this
+# one Artifact Registry repository.
+resource "google_artifact_registry_repository_iam_member" "cloudbuild_runner_artifactregistry" {
+  project    = var.gcp_project
+  location   = google_artifact_registry_repository.odoo_repo.location
+  repository = google_artifact_registry_repository.odoo_repo.repository_id
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.cloudbuild_runner.email}"
+}
+
+# Required by Cloud Build whenever a non-default build service account is
+# specified, regardless of the custom --gcs-log-dir above.
+resource "google_project_iam_member" "cloudbuild_runner_logwriter" {
+  project = var.gcp_project
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.cloudbuild_runner.email}"
+}
