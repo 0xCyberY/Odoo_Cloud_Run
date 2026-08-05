@@ -844,8 +844,14 @@ resource "google_storage_bucket" "cloudbuild_source" {
   }
 }
 
+# roles/storage.admin here is BUCKET-scoped (via google_storage_bucket_iam_member,
+# not google_project_iam_member) — it reaches only this one bucket, not every
+# tenant's attachment bucket. Needed over roles/storage.objectAdmin: `gcloud
+# builds submit` also calls storage.buckets.get to verify the staging bucket,
+# which objectAdmin (object permissions only) does not grant — that gap is
+# exactly what "user is forbidden from accessing the bucket" meant.
 resource "google_storage_bucket_iam_member" "github_actions_deployer_cloudbuild_source" {
   bucket = google_storage_bucket.cloudbuild_source.name
-  role   = "roles/storage.objectAdmin"
+  role   = "roles/storage.admin"
   member = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
