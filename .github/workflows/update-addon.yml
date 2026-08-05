@@ -74,7 +74,8 @@ jobs:
           IMG="${{ steps.cfg.outputs.region }}-docker.pkg.dev/${{ steps.cfg.outputs.project }}/${REPO}/odoo-pooled"
           TAG="${GITHUB_SHA::12}"
           STAGING="gs://${{ steps.cfg.outputs.project }}-cloudbuild-source/source"
-          gcloud builds submit odoo-v18/ --tag "${IMG}:${TAG}" --project "${{ steps.cfg.outputs.project }}" --gcs-source-staging-dir="${STAGING}"
+          LOGDIR="gs://${{ steps.cfg.outputs.project }}-cloudbuild-source/logs"
+          gcloud builds submit odoo-v18/ --tag "${IMG}:${TAG}" --project "${{ steps.cfg.outputs.project }}" --gcs-source-staging-dir="${STAGING}" --gcs-log-dir="${LOGDIR}"
           gcloud artifacts docker tags add "${IMG}:${TAG}" "${IMG}:latest"
           echo "image=${IMG}:${TAG}" >> "$GITHUB_OUTPUT"
 
