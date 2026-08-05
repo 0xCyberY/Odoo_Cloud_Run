@@ -188,6 +188,22 @@ class IrModuleModule(models.Model):
                 ])
         return super()._search(domain, *args, **kwargs)
 
+    # ── Module discovery (Update Apps List) ─────────────────────────────────
+    def update_list(self):
+        # update_list() scans addons_path and inserts a state='uninstalled'
+        # row for anything not yet known, deciding "already known?" via this
+        # very model's _search(). The visibility filter above hides
+        # blocked+uninstalled modules from non-sudo interactive searches —
+        # without this override, update_list() can't see a blocked module's
+        # existing row and repeatedly tries to re-insert it, hitting
+        # ir_module_module_name_uniq on every "Update Apps List" click (the
+        # full catalog is scanned into every tenant's addons_path regardless
+        # of entitlement). Run sudo'd, like the other internal-machinery
+        # exemptions in this file, so discovery always sees the full
+        # picture; interactive browsing still goes through the non-sudo path
+        # above and stays filtered.
+        return super(IrModuleModule, self.sudo()).update_list()
+
     # ── Hard install/upgrade gate ────────────────────────────────────────────
     # Enforced in EVERY context except the operator CLI Jobs — no sudo exemption
     # and, deliberately, no "interactive only" exemption: tenant ir.cron code

@@ -67,7 +67,8 @@ class CloudRunProvisioner:
         self.client_name = client_name
         self.init_db = init_db
         self.dry_run = dry_run
-        
+        self.workspace_is_new = False
+
         # Load clients configuration
         self.config_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -205,7 +206,8 @@ class CloudRunProvisioner:
             ws_list_res = run_cmd(["terraform", "workspace", "list"], cwd=tf_dir)
             workspaces = [w.strip().replace("*", "").strip() for w in ws_list_res.stdout.split("\n") if w.strip()]
 
-            if self.client_name in workspaces:
+            self.workspace_is_new = self.client_name not in workspaces
+            if not self.workspace_is_new:
                 run_cmd(["terraform", "workspace", "select", self.client_name], cwd=tf_dir, capture_output=False)
             else:
                 run_cmd(["terraform", "workspace", "new", self.client_name], cwd=tf_dir, capture_output=False)
@@ -265,6 +267,23 @@ class CloudRunProvisioner:
         db-setup to sync the Odoo admin credentials (the init leaves admin/admin,
         which must never reach a public URL)."""
         if not self.init_db:
+            if self.workspace_is_new:
+                # Terraform (step 2) already created this tenant's DNS/routing
+                # pointing at the shared pooled service, but the database has
+                # no tables and ir_module_module has never been populated.
+                # Skipping init here leaves it exposed to live traffic before
+                # any single-process warm-up has run — the first concurrent
+                # requests race to INSERT the same "newly discovered module"
+                # rows into ir_module_module and log spurious
+                # "name of the module must be unique" warnings (harmless but
+                # noisy), or worse, 500 on missing tables. Refuse instead of
+                # silently leaving a half-provisioned tenant live.
+                raise RuntimeError(
+                    f"Client '{self.client_name}' is being provisioned for the first time "
+                    "(new Terraform workspace) but --init-db was not passed. Routing is "
+                    "already live for this tenant with an uninitialized database. "
+                    "Re-run with --init-db to initialize it before it serves traffic."
+                )
             log_info("Database initialization not requested. Skipping job execution.")
             return
 
