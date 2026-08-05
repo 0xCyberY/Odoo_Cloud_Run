@@ -29,3 +29,13 @@ output "ssl_certificate" {
   value       = google_compute_managed_ssl_certificate.default_cert.name
   description = "Managed certificate name — check provisioning status after pointing DNS"
 }
+
+output "github_actions_workload_identity_provider" {
+  value       = google_iam_workload_identity_pool_provider.github_actions.name
+  description = "Set as the GCP_WORKLOAD_IDENTITY_PROVIDER secret in the repo's 'production' GitHub environment"
+}
+
+output "github_actions_service_account" {
+  value       = google_service_account.github_actions_deployer.email
+  description = "Set as the GCP_SERVICE_ACCOUNT secret in the repo's 'production' GitHub environment"
+}

@@ -70,3 +70,9 @@ variable "alert_email" {
   description = "Email address for Cloud Monitoring alert notifications (empty disables the channel)"
   default     = ""
 }
+
+variable "github_repo" {
+  type        = string
+  description = "GitHub \"owner/repo\" allowed to authenticate as the CI/CD deployer via Workload Identity Federation — scoped to exactly this repo, no other GitHub repo can assume the role."
+  default     = "0xCyberY/Odoo_Cloud_Run"
+}

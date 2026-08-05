@@ -732,3 +732,120 @@ resource "google_workflows_workflow" "fleet_migration" {
               migrated: $${migrated}
   EOT
 }
+
+# 20. GitHub Actions CI/CD — Workload Identity Federation
+# deploy-fleet.yml and update-addon.yml (google-github-actions/auth) need a
+# workload_identity_provider + service_account. Neither existed after the
+# 2026-08-03 project rebuild — the workflows failed with "must specify
+# exactly one of workload_identity_provider or credentials_json" because both
+# GitHub secrets were empty. Keyless OIDC federation (no long-lived JSON key
+# to leak/rotate), scoped by attribute_condition to ONLY var.github_repo —
+# no other GitHub repo, fork, or workflow can assume this identity.
+resource "google_iam_workload_identity_pool" "github_actions" {
+  workload_identity_pool_id = "github-actions-pool"
+  project                   = var.gcp_project
+  display_name              = "GitHub Actions"
+  description               = "OIDC federation for this repo's CI/CD workflows (deploy-fleet, update-addon)"
+}
+
+resource "google_iam_workload_identity_pool_provider" "github_actions" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github_actions.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-actions-provider"
+  project                            = var.gcp_project
+  display_name                       = "GitHub OIDC"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+  }
+
+  # Hard trust boundary: only tokens minted for var.github_repo are accepted,
+  # regardless of what the SA IAM binding below would otherwise allow.
+  attribute_condition = "assertion.repository == \"${var.github_repo}\""
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+resource "google_service_account" "github_actions_deployer" {
+  account_id   = "github-actions-deployer"
+  display_name = "GitHub Actions CI/CD deployer"
+  project      = var.gcp_project
+}
+
+# Only workflow runs FROM var.github_repo can impersonate this SA.
+resource "google_service_account_iam_member" "github_actions_wif_binding" {
+  service_account_id = google_service_account.github_actions_deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
+}
+
+# Roles actually exercised by deploy-fleet.yml / update-addon.yml:
+#   cloudbuild.builds.editor  — gcloud builds submit
+#   artifactregistry.writer   — gcloud artifacts docker tags add
+#   run.admin                 — gcloud run services/jobs update, jobs execute
+#   iam.serviceAccountUser    — act as pooled-run-sa/websocket-run-sa/
+#                                cron-runner-run-sa when updating their revisions
+#   workflows.invoker         — gcloud workflows run odoo-fleet-migration
+resource "google_project_iam_member" "github_actions_deployer_cloudbuild" {
+  project = var.gcp_project
+  role    = "roles/cloudbuild.builds.editor"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_artifactregistry" {
+  project = var.gcp_project
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_run" {
+  project = var.gcp_project
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_sa_user" {
+  project = var.gcp_project
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_workflows" {
+  project = var.gcp_project
+  role    = "roles/workflows.invoker"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+# `gcloud builds submit` without --gcs-source-staging-dir uploads source to
+# Cloud Build's auto-managed <project>_cloudbuild bucket, which requires
+# broad roles/storage.admin on the caller to read/write/auto-create — that
+# would ALSO grant github_actions_deployer full control over every tenant's
+# attachment bucket (over-broad for a "build and deploy code" identity). A
+# dedicated bucket with a bucket-scoped IAM binding keeps CI's storage access
+# limited to exactly this one bucket. The workflows must pass
+# --gcs-source-staging-dir=gs://<this bucket>/source explicitly.
+resource "google_storage_bucket" "cloudbuild_source" {
+  name                        = "${var.gcp_project}-cloudbuild-source"
+  project                     = var.gcp_project
+  location                    = var.region
+  uniform_bucket_level_access = true
+
+  # Source archives are only needed for the duration of a build; do not let
+  # this grow unbounded.
+  lifecycle_rule {
+    condition {
+      age = 7
+    }
+    action {
+      type = "Delete"
+    }
+  }
+}
+
+resource "google_storage_bucket_iam_member" "github_actions_deployer_cloudbuild_source" {
+  bucket = google_storage_bucket.cloudbuild_source.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}

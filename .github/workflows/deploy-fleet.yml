@@ -62,12 +62,13 @@ jobs:
         run: |
           IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
           TAG="${{ steps.meta.outputs.sha_tag }}"
+          STAGING="gs://${PROJECT}-cloudbuild-source/source"
           gcloud builds submit odoo-v18/ \
-            --tag "${IMG}/odoo-pooled:${TAG}" --project "${PROJECT}"
+            --tag "${IMG}/odoo-pooled:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}"
           gcloud artifacts docker tags add \
             "${IMG}/odoo-pooled:${TAG}" "${IMG}/odoo-pooled:latest"
           gcloud builds submit odoo-v18/pgbouncer/ \
-            --tag "${IMG}/pgbouncer:${TAG}" --project "${PROJECT}"
+            --tag "${IMG}/pgbouncer:${TAG}" --project "${PROJECT}" --gcs-source-staging-dir="${STAGING}"
           gcloud artifacts docker tags add \
             "${IMG}/pgbouncer:${TAG}" "${IMG}/pgbouncer:latest"
 
