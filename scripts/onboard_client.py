@@ -44,6 +44,7 @@ import sys
 import tempfile
 
 import yaml
+from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prepare_addons  # noqa: E402
@@ -57,6 +58,11 @@ CLIENTS_YAML_PATH = os.path.join(REPO_ROOT, "clients", "clients.yaml")
 IR_MODULE_PATH = os.path.join(
     REPO_ROOT, "odoo-v18", "addons", "addon_entitlement", "models", "ir_module.py"
 )
+
+# GITHUB_TOKEN (used by _resolve_selected_modules -> prepare_addons.clone)
+# comes from the environment or, if unset, a .env file in the repo root
+# (gitignored — see .env.example).
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
 # Mirrors terraform/main.tf's cloud_run_init_job args — the platform baseline
 # every tenant gets regardless of plan. Keep both copies in sync if that
 # changes (separate Terraform state, no cross-stack variable sharing, same

@@ -8,6 +8,11 @@ crash.log
 crash.*.log
 *.tfvars.backup
 
+# Secrets — never commit real credentials; .env.example documents the shape
+.env
+.env.*
+!.env.example
+
 # OS
 .DS_Store
 

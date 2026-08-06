@@ -10,10 +10,12 @@ image rebuild: per-client visibility/install is enforced at runtime by the
 addon_entitlement module from ODOO_ENTITLEMENTS (rendered by terraform/shared
 from each client's addon_repos catalog references).
 
-Repos are cloned with GITHUB_TOKEN (env) for private access; .git dirs are
+Repos are cloned with GITHUB_TOKEN for private access; .git dirs are
 stripped so no credentials or history leak into the build context.
+GITHUB_TOKEN is read from the environment or, if unset, from a .env file
+in the repo root (gitignored — see .env.example) via python-dotenv.
 
-Usage: GITHUB_TOKEN=... python3 scripts/prepare_addons.py [--clean]
+Usage: python3 scripts/prepare_addons.py [--clean]
 """
 
 import argparse
@@ -23,12 +25,15 @@ import subprocess
 import sys
 
 import yaml
+from dotenv import load_dotenv
 
 import validate_clients
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENTS_YAML = os.path.join(ROOT, "clients", "clients.yaml")
 BUILD_ADDONS = os.path.join(ROOT, "odoo-v18", "build-addons")
+
+load_dotenv(os.path.join(ROOT, ".env"))
 
 
 def clone(repo, branch, dest, token):
