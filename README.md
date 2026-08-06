@@ -52,6 +52,7 @@ Async / control plane:
 14. [Migrating a live pre-v2 environment (historical)](#14-migrating-a-live-pre-v2-environment-historical--not-needed-on-a-fresh-project)
 15. [Fixes legend](#15-fixes-legend--v1-weakness--v2-solution)
 16. [Deploy-time gotchas — hit once, now handled in code](#16-deploy-time-gotchas--hit-once-now-handled-in-code)
+17. [Debugging production — read-only queries & one-off fixes](#17-debugging-production--read-only-queries--one-off-fixes)
 
 ---
 
@@ -380,13 +381,33 @@ through the JSON API (fsspec/gcsfs) — deliberately **not** GCS FUSE (weak POSI
 guarantees corrupt attachments) and not Filestore (cost). The install chain per
 tenant is `gcs_attachment_default → fs_attachment → fs_storage →
 server_environment` (+ core `base_sparse_field`), all baked into the image and
-covered by the build assertions and CI smoke test. The repo-owned module
-`gcs_attachment_default` runs at tenant init: it reads the `GCS_BUCKET` env var
-(set per tenant on the init/migration jobs) and creates the `fs.storage` record
-inside that tenant's database with `use_as_default_for_attachments = true` and
-`token = google_default` (service-account auth via ADC — no key files). Because
-the record lives in the tenant DB, the pooled service needs **no** per-tenant
-configuration.
+covered by the build assertions and CI smoke test.
+
+The GCS backend config (`protocol`, `options`, `directory_path`,
+`use_as_default_for_attachments`) is **entirely env-driven**, not a DB write.
+`fs_storage`'s own fields become server-env fields once `server_environment` is
+installed, so writing them directly on the `fs.storage` record is silently
+dropped by Odoo (no DB column exists for them anymore) — see §16's gotcha row
+for the incident this caused. The repo-owned `gcs_attachment_default` module
+only creates the placeholder `fs.storage` record (code `gcs_att`) at tenant
+init; the actual backend config comes from the `SERVER_ENV_CONFIG` env var
+(section `[fs_storage.gcs_att]`, `directory_path` templated on `{db_name}`),
+which **must be set on every process that can write an attachment** — that
+means all three long-running services (`terraform/shared`'s
+`local.server_env_config`) *and* the per-tenant `init`/`migration` Cloud Run
+Jobs (`terraform/main.tf`'s mirrored copy of the same local, `env_extra`). The
+`GCS_BUCKET` env var set on those Jobs is vestigial — nothing in the codebase
+reads it; do not rely on it for anything.
+
+Small images (menu icons, partner avatars — <50KB by default) are
+deliberately force-stored **in the database** rather than GCS
+(`fs_attachment`'s `force_db_for_default_attachment_rules`, mimetype
+`image/`), same for JS/CSS asset bundles regardless of size — this is by
+design (faster reads for content requested on nearly every page), not a
+storage-routing bug. Don't mistake a `db_datas`-backed row (`store_fname`
+empty) for broken; check `store_fname LIKE 'gcs_att://%'` vs a plain
+`<hash-prefix>/<hash>` path to distinguish correctly-GCS-routed from
+legacy-local-disk instead.
 
 ### Cron → one dedicated runner (Fix #8)
 
@@ -508,7 +529,7 @@ It reads `clients.yaml` too (for `db_user`), so tfvars stay minimal.
 | Module | Provides |
 |---|---|
 | `cloud-run-odoo` | Cloud Run v2 service: run modes, optional pgbouncer sidecar with per-tenant secret env, NEG/ingress/public-access toggles, probes, labels. `ignore_changes` on image + traffic — **CI owns those** |
-| `cloud-run-job` | Cloud Run v2 job preserving the image entrypoint (so `odoo.conf` gets generated); `env_extra` for TENANT_DB / GCS_BUCKET etc. |
+| `cloud-run-job` | Cloud Run v2 job preserving the image entrypoint (so `odoo.conf` gets generated); `env_extra` for TENANT_DB / SERVER_ENV_CONFIG etc. — **the init and migration jobs must set `SERVER_ENV_CONFIG`** (§7) or attachments they create fall back to the job's local disk and are lost when it exits |
 | `cloud-sql-db` | Tenant database + Odoo admin credential secrets |
 
 ---
@@ -1190,8 +1211,137 @@ re-learns them the hard way in this or any future project.
 | `session_redis` 18.0 defaults **SSL to ON** (`ODOO_SESSION_REDIS_SSL=1`) — TLS handshake against no-TLS Memorystore hangs ~60s per request | 500s + extreme slowness | entrypoint exports `ODOO_SESSION_REDIS_SSL=0` (override with `REDIS_SSL=1` if transit encryption is enabled) |
 | Odoo's `list_dbs()` only returns databases **owned by the connecting role** — with per-tenant DB owners (Fix #4), discovery as `odoo_shared` returns nothing and every host lands on the database selector | "database manager has been disabled" page on all tenants | repo-owned `platform_dblist` module (server-wide) serves the list from `ODOO_DATABASES`, which Terraform renders from clients.yaml onto all three services |
 | Cloud Run services **and jobs** pin the image digest at deploy/update — not at execution | stale `:latest` after rebuild | deploy-fleet re-points everything; manual rebuilds must `services/jobs update --image` |
-| OCA `fs_storage` makes `protocol`/`options`/`directory_path`/`use_as_default_for_attachments` **server-env fields** (no DB columns) when `server_environment` is installed — writing them on the `fs.storage` record is silently dropped, so attachments (incl. web asset bundles) fall back to the **ephemeral local filestore** and styling breaks on every revision roll / cold start | unstyled/heavy pages, `FileNotFoundError .../filestore/...`, 500s after any deploy | backend config supplied via `SERVER_ENV_CONFIG` (section `[fs_storage.gcs_att]`) rendered by `terraform/shared` (`local.server_env_config`) onto all three services; `gcs_attachment_default` only creates the record. JS/CSS bundles then persist in the DB (fs_attachment `force_db` rules), other attachments in GCS — both survive rolls |
+| OCA `fs_storage` makes `protocol`/`options`/`directory_path`/`use_as_default_for_attachments` **server-env fields** (no DB columns) when `server_environment` is installed — writing them on the `fs.storage` record is silently dropped, so attachments (incl. web asset bundles) fall back to the **ephemeral local filestore** and styling breaks on every revision roll / cold start | unstyled/heavy pages, `FileNotFoundError .../filestore/...`, 500s after any deploy | backend config supplied via `SERVER_ENV_CONFIG` (section `[fs_storage.gcs_att]`) — `gcs_attachment_default` only creates the record |
+| ...that `SERVER_ENV_CONFIG` fix initially only reached the three long-running services (`terraform/shared`) — the per-tenant `init`/`migration` **Cloud Run Jobs** (`terraform/main.tf`) never had it at all (only the unread `GCS_BUCKET`). Every module install/upgrade run through those Jobs wrote attachments to the job's local disk, destroyed within seconds of the job exiting — this **recurred on every fleet migration**, not just once at bring-up | icons/CSS/menu images 404 again after *every* `-u all` migration, even months after the original fix | `local.server_env_config` mirrored into `terraform/main.tf` (own copy — separate Terraform state, no cross-stack variable sharing) and wired into both Jobs' `env_extra`; §17 has the verification command to run after any future job/module change touching attachment writes |
+| Odoo dedups `ir.attachment` by content checksum — rewriting a menu icon whose bytes are byte-identical to before (core module icons never change) reuses the **existing** `store_fname`, even if that file no longer exists, instead of writing fresh | icon `write()`'d successfully (no error) but still 404s | `DELETE` the stale `ir_attachment` row first so there's no checksum collision, *then* re-trigger the write — see §17 |
 | `odoo -i base` does **not** install the `web` client — a tenant provisioned without it 500s on `/web/login` (`External ID not found: web.login`) | login page 500 on a "successfully" provisioned tenant | init job installs `base,web,...` (`terraform/main.tf`) |
 | `gcloud builds submit odoo-v18/` falls back to the repo `.gitignore` (which excludes `build-addons/`) when no `.gcloudignore` exists → image ships with an **empty addon catalog** | tenants' custom modules missing at runtime | `odoo-v18/.gcloudignore` explicitly keeps `build-addons/` in the upload |
 | Renaming a client's `database` in clients.yaml/tfvars → `terraform plan` shows `google_sql_database.client must be replaced` (name is ForceNew) = **DESTROY the live tenant DB** | data loss on a "rename" | never plain-apply; rename in place (`ALTER DATABASE` in-VPC) + `terraform state rm`/`import`, per §13 |
 
+
+---
+
+## 17. Debugging Production — Read-Only Queries & One-Off Fixes
+
+No `psql`/Cloud SQL Auth Proxy path exists from a laptop to the shared
+instance (private IP only, no public IP — by design). No SSH, no `docker
+exec` into a live revision either. The pattern below — a **throwaway Cloud
+Run Job**, same VPC/image/service-account as the real tenant Jobs, deleted
+immediately after — is how every investigation and fix in this section was
+actually done. It's the supported way to inspect or repair a tenant database
+without adding standing infrastructure.
+
+### Read-only SQL query against a tenant DB
+
+```bash
+PROJECT=project-b85b49c5-5bdc-48ac-989
+DB=acme                          # tenant database name
+DB_USER=acme_production2         # from clients.yaml: clients.<slug>.db_user
+SECRET=acme-corp-db-password     # <client_slug>-db-password
+
+# Write the query to a file, then base64 it — avoids every shell-quoting
+# pitfall below (commas break --args' default list parsing; multi-line
+# strings break --set-env-vars silently, see the warning further down).
+SQL_B64=$(base64 < query.sql | tr -d '\n')
+
+gcloud run jobs create diag-readonly-tmp \
+  --project="$PROJECT" --region=europe-west1 \
+  --image=europe-west1-docker.pkg.dev/${PROJECT}/odoo-v18-repo/odoo-pooled:latest \
+  --service-account=pooled-run-sa@${PROJECT}.iam.gserviceaccount.com \
+  --network=projects/${PROJECT}/global/networks/odoo-vpc \
+  --subnet=projects/${PROJECT}/regions/europe-west1/subnetworks/odoo-cloudrun-subnet \
+  --vpc-egress=private-ranges-only \
+  --set-env-vars="DB_HOST=10.10.0.3,DB_PORT=5432,DB_USER=${DB_USER},DB_NAME=${DB},SQL_B64=${SQL_B64}" \
+  --set-secrets="DB_PASSWORD=${SECRET}:latest" \
+  --command=/bin/bash \
+  --args='^|^-c|base64 -d <<< "$SQL_B64" > /tmp/q.sql && PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f /tmp/q.sql' \
+  --max-retries=0 --task-timeout=120
+
+gcloud run jobs execute diag-readonly-tmp --region=europe-west1 --project="$PROJECT" --wait
+gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="diag-readonly-tmp"' \
+  --project="$PROJECT" --freshness=10m --format='value(timestamp,textPayload)'
+
+# ALWAYS clean up — this is a throwaway, not standing infrastructure:
+gcloud run jobs delete diag-readonly-tmp --region=europe-west1 --project="$PROJECT" --quiet
+```
+
+`^|^` before `-c` tells `gcloud` to split `--args` on `|` instead of the
+default `,` — the SQL/Python payloads below routinely contain commas, which
+would otherwise silently truncate the argument list.
+
+### One-off ORM fix via `odoo shell`
+
+For anything that needs Odoo's own logic (e.g. re-triggering a computed
+field's write hook — raw SQL can't do this correctly, see the checksum-dedup
+gotcha in §16), bypass `/entrypoint.sh` and pass DB connection flags directly
+to `odoo shell` instead of relying on a generated `odoo.conf`:
+
+```bash
+PY_B64=$(base64 < script.py | tr -d '\n')
+
+# Multi-line env vars (SERVER_ENV_CONFIG) MUST go through --env-vars-file,
+# NEVER --set-env-vars="KEY=multi\nline" — embedding a real multi-line
+# string in a --set-env-vars argument silently mangles it (fields end up
+# False/empty), and the failure mode is quiet: no error, just wrong
+# behavior. This bit us mid-investigation — the odoo shell job appeared to
+# work (no error) but attachments it "fixed" landed on local disk again.
+cat > envvars.yaml << YAMLEOF
+PY_B64: "${PY_B64}"
+ODOO_ENTITLEMENT_BYPASS: "1"
+SERVER_ENV_CONFIG: |
+  [fs_storage.gcs_att]
+  protocol=gcs
+  options={"token": "google_default", "project": "${PROJECT}"}
+  directory_path=${PROJECT}-${CLIENT_SLUG}-odoo-attachments
+  use_as_default_for_attachments=True
+YAMLEOF
+
+gcloud run jobs create diag-shell-tmp \
+  --project="$PROJECT" --region=europe-west1 \
+  --image=europe-west1-docker.pkg.dev/${PROJECT}/odoo-v18-repo/odoo-pooled:latest \
+  --service-account=pooled-run-sa@${PROJECT}.iam.gserviceaccount.com \
+  --network=projects/${PROJECT}/global/networks/odoo-vpc \
+  --subnet=projects/${PROJECT}/regions/europe-west1/subnetworks/odoo-cloudrun-subnet \
+  --vpc-egress=private-ranges-only \
+  --env-vars-file=envvars.yaml \
+  --set-secrets="DB_PASSWORD=${SECRET}:latest" \
+  --command=/bin/bash \
+  --args="^|^-c|base64 -d <<< \"\$PY_B64\" > /tmp/s.py && odoo shell -d ${DB} --addons-path=/opt/extra-addons,/mnt/platform-addons,/mnt/custom-shared/Accounting,/mnt/custom-shared/Human-Resources,/mnt/custom-shared/Odoo-Customization-Module,/mnt/custom-shared/common --db_host=10.10.0.3 --db_port=5432 --db_user=${DB_USER} --db_password=\"\$DB_PASSWORD\" --no-http --logfile=/dev/stdout < /tmp/s.py" \
+  --max-retries=0 --task-timeout=120
+
+gcloud run jobs execute diag-shell-tmp --region=europe-west1 --project="$PROJECT" --wait
+# ... read logs, then delete, exactly as above.
+```
+
+`ODOO_ENTITLEMENT_BYPASS=1` matches the trust boundary the real init/migration
+Jobs run under (§10) — omit it and `addon_entitlement`'s hard gates apply as
+they would to a tenant user.
+
+### Verify no attachments are stuck on local disk
+
+Run this after touching anything that installs/upgrades modules (a new
+catalog repo, a `-u all` migration, a manual `odoo shell` fix) — it's the
+single query that would have caught every incident in this section
+immediately instead of after user reports:
+
+```sql
+-- 0 rows = clean. Anything else = attachments written before
+-- SERVER_ENV_CONFIG took effect for whatever process created them.
+SELECT count(*) FROM ir_attachment
+WHERE store_fname IS NOT NULL AND store_fname NOT LIKE 'gcs_att://%';
+```
+
+If non-zero: inspect the rows (`id, name, res_model, res_field, res_id,
+mimetype, store_fname, create_date`) to confirm they're regenerable system
+content (menu/module icons, demo images, compiled CSS — not user uploads),
+`DELETE` them, then for any `ir.ui.menu.web_icon_data` rows specifically,
+re-trigger their compute hook (raw `DELETE` alone isn't enough for these —
+see §16):
+
+```python
+menus = env['ir.ui.menu'].browse([1, 15, 16])  # ids stable across tenants
+for m in menus:
+    if m.web_icon:
+        m.write({'web_icon': m.web_icon})
+env.cr.commit()
+```
