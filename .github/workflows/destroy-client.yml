@@ -1,10 +1,19 @@
 name: Destroy client
+# Two independent triggers, one job:
+#   workflow_dispatch — manual path: calls scripts/destroy.py directly
+#     instead of duplicating terraform steps in YAML — mirrors
+#     provision-client.yml's rewrite, one implementation instead of two.
+#   repository_dispatch (types: client-offboarding) — automated path: same
+#     script, client_slug sourced from client_payload instead of a workflow
+#     input. That's the only payload needed to identify what to tear down.
 on:
   workflow_dispatch:
     inputs:
       client_slug:
         required: true
         description: 'e.g. acme-corp'
+  repository_dispatch:
+    types: [client-offboarding]
 
 concurrency:
   group: terraform-apply
@@ -20,6 +29,7 @@ jobs:
     env:
       # Repo variable (Settings → Actions → Variables), not hardcoded.
       GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      TF_VAR_gcp_project: ${{ vars.GCP_PROJECT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,16 +44,15 @@ jobs:
         with:
           terraform_version: '1.8.0'
 
-      - name: Terraform init
-        run: terraform -chdir=terraform init -backend-config="bucket=${GCP_PROJECT}-tf-state"
+      - name: Install script dependencies
+        run: pip install -r scripts/requirements.txt -q
 
-      - name: Select workspace
-        run: terraform -chdir=terraform workspace select ${{ inputs.client_slug }}
-
-      - name: Terraform destroy
-        run: terraform -chdir=terraform destroy -auto-approve -var-file=../clients/${{ inputs.client_slug }}.tfvars
-
-      - name: Switch back to default workspace and delete client workspace
-        run: |
-          terraform -chdir=terraform workspace select default
-          terraform -chdir=terraform workspace delete ${{ inputs.client_slug }}
+      - name: Destroy client (terraform destroy + workspace cleanup)
+        # CLIENT_SLUG goes through env: and is referenced as "$CLIENT_SLUG"
+        # below, never as a raw ${{ }} expression in the script body — for
+        # the repository_dispatch path this value is caller-controlled
+        # (client_payload), and ${{ }} substitutes as literal script text
+        # before bash parses it, which is a script-injection sink.
+        env:
+          CLIENT_SLUG: ${{ inputs.client_slug || github.event.client_payload.client_slug }}
+        run: python3 scripts/destroy.py --client "$CLIENT_SLUG"

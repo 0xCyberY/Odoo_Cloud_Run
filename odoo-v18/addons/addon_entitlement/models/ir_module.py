@@ -65,6 +65,17 @@ CUSTOM_SHARED_DIR = "/mnt/custom-shared"
 ALWAYS_ENTITLED_DIRS = frozenset({"common"})
 # Modules no tenant may ever see or install, wherever they live
 PLATFORM_BLOCKLIST = frozenset({"base_import_module"})
+# Module technical names (drawn from the always-entitled 'common' catalog)
+# that onboard_client.py auto-installs on EVERY new tenant by default, on top
+# of the fixed base (terraform/main.tf's cloud_run_init_job args:
+# base,web,gcs_attachment_default,addon_entitlement) and that client's own
+# selected_addons. Not enforcement — this file only decides what's entitled;
+# onboard_client.py reads this constant (via ast, no odoo runtime import) to
+# build the init job's -i list. Empty by default: populate with real
+# technical names from the 'common' catalog repo as the platform decides what
+# ships out of the box — a wrong/nonexistent name here aborts every future
+# init job with "module not found", so don't guess.
+DEFAULT_AUTO_INSTALL = frozenset()
 
 # Image contents are immutable per process — cache the catalog scan once and
 # the per-database blocked set per dbname (env never changes within a revision).

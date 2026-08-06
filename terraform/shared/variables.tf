@@ -76,3 +76,9 @@ variable "github_repo" {
   description = "GitHub \"owner/repo\" allowed to authenticate as the CI/CD deployer via Workload Identity Federation — scoped to exactly this repo, no other GitHub repo can assume the role."
   default     = "0xCyberY/Odoo_Cloud_Run"
 }
+
+variable "enable_certificate_manager" {
+  type        = bool
+  default     = false
+  description = "Cuts over from the single shared-SAN google_compute_managed_ssl_certificate to per-domain Certificate Manager. Defaults false so the migration stays inert code until a deliberate, confirmed apply — flipping it affects live HTTPS for every existing tenant (acme/beta/mac) and must never happen as a side effect of a routine tenant onboarding/provisioning apply (which also runs `terraform apply` on this same shared workspace). Flip to true only in an apply whose entire purpose is this migration."
+}

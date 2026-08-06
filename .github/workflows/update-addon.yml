@@ -107,6 +107,17 @@ jobs:
 
       - name: Notify
         if: always()
-        run: python scripts/notify.py --client ${{ inputs.client_slug }} --module ${{ inputs.module_name }} --status ${{ steps.update.outcome }}
-        env:
-          SMTP_CREDS: '${{ secrets.SMTP_CREDS }}'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.sendgrid.net
+          server_port: 465
+          username: apikey
+          password: ${{ secrets.SENDGRID_API_KEY }}
+          from: ${{ vars.NOTIFY_EMAIL_FROM }}
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          subject: "[Odoo SaaS] Client '${{ inputs.client_slug }}' — addon update ${{ job.status }}"
+          body: |
+            Client: ${{ inputs.client_slug }}
+            Module: ${{ inputs.module_name }}
+            Status: ${{ job.status }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

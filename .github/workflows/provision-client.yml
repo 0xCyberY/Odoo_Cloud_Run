@@ -1,4 +1,17 @@
 name: Provision client
+# Two independent triggers, one job:
+#   workflow_dispatch  — manual path: calls scripts/provision.py directly for
+#     an EXISTING clients.yaml entry, instead of duplicating terraform/gcloud
+#     steps in YAML. CI inherits the same state-drift guard
+#     (_reconcile_database_drift) as local runs, one implementation instead
+#     of two.
+#   repository_dispatch (types: client-onboarding) — automated path: calls
+#     scripts/onboard_client.py, which adds the clients.yaml entry itself
+#     from client_payload, then runs the whole provisioning flow. Fired
+#     directly via `gh api repos/:owner/:repo/dispatches -f
+#     event_type=client-onboarding -f client_payload[...]=...` (fine-grained
+#     PAT) — no wrapping API service. The caller can be a human's terminal,
+#     an external script, or a step in another GitHub Actions workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +21,8 @@ on:
       domain:
         required: true
         description: 'e.g. acme.nomowsoft.com'
+  repository_dispatch:
+    types: [client-onboarding]
 
 concurrency:
   group: terraform-apply
@@ -42,62 +57,102 @@ jobs:
       - name: Terraform fmt check
         run: terraform -chdir=terraform fmt -check -recursive
 
-      # Shared stack first: the tenant's SQL user + password secret, pgbouncer
-      # credential map, SSL certificate domain, and uptime check all derive
-      # from clients.yaml and must exist before the tenant workspace applies.
-      - name: Apply shared infrastructure (clients.yaml driven)
-        run: |
-          terraform -chdir=terraform/shared init -backend-config="bucket=${GCP_PROJECT}-tf-state"
-          terraform -chdir=terraform/shared apply -auto-approve
+      - name: Install script dependencies
+        run: pip install -r scripts/requirements.txt -q
 
-      - name: Terraform init
-        run: terraform -chdir=terraform init -backend-config="bucket=${GCP_PROJECT}-tf-state"
-
-      - name: Select or create workspace
-        run: |
-          terraform -chdir=terraform workspace select ${{ inputs.client_slug }} || \
-            terraform -chdir=terraform workspace new ${{ inputs.client_slug }}
-
-      - name: Terraform validate
-        run: terraform -chdir=terraform validate
-
-      - name: Terraform plan
-        run: terraform -chdir=terraform plan -var-file=../clients/${{ inputs.client_slug }}.tfvars -out=tfplan
-
-      - name: Terraform apply
-        # Retry once: tenant jobs reference secrets granted by the shared stack
-        # moments earlier, and Secret Manager IAM is eventually consistent.
-        run: |
-          terraform -chdir=terraform apply tfplan || {
-            echo "Apply failed — retrying once in 30s (IAM propagation lag)"
-            sleep 30
-            terraform -chdir=terraform apply -auto-approve -var-file=../clients/${{ inputs.client_slug }}.tfvars
-          }
-
-      - name: Harden tenant database (least-privilege user) and initialize
-        run: |
-          REGION=$(grep 'region' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
-          PROJECT=$(grep 'gcp_project' clients/${{ inputs.client_slug }}.tfvars | awk -F'"' '{print $2}')
-          if [ -z "$PROJECT" ]; then
-            echo "::error::no gcp_project found in clients/${{ inputs.client_slug }}.tfvars"
-            exit 1
-          fi
-          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
-            --region="${REGION:-europe-west1}" \
-            --project="${PROJECT}" \
-            --wait
-          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-init \
-            --region="${REGION:-europe-west1}" \
-            --project="${PROJECT}" \
-            --wait
-          # Re-run db-setup after init: syncs the real Odoo admin credentials
-          # (init leaves admin/admin, which must never reach a public URL)
-          gcloud run jobs execute ${{ inputs.client_slug }}-odoo-job-db-setup \
-            --region="${REGION:-europe-west1}" \
-            --project="${PROJECT}" \
-            --wait
+      # ── Manual path (workflow_dispatch) ─────────────────────────────────
+      - name: Provision client (shared infra, terraform, DB init)
+        if: github.event_name == 'workflow_dispatch'
+        run: python3 scripts/provision.py --client ${{ inputs.client_slug }} --init-db
 
       - name: Notify
-        run: python scripts/notify.py --client ${{ inputs.client_slug }} --event provisioned
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.sendgrid.net
+          server_port: 465
+          username: apikey
+          password: ${{ secrets.SENDGRID_API_KEY }}
+          from: ${{ vars.NOTIFY_EMAIL_FROM }}
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          subject: "[Odoo SaaS] Client '${{ inputs.client_slug }}' — provision ${{ job.status }}"
+          body: |
+            Client: ${{ inputs.client_slug }}
+            Domain: ${{ inputs.domain }}
+            Status: ${{ job.status }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # ── Automated path (repository_dispatch: client-onboarding) ────────
+      # client_payload fields: client_slug (required); exactly one of domain
+      # (client-owned) or subdomain=true (platform subdomain — always the
+      # client_slug itself, e.g. newco-corp -> newco-corp.nomowsoft.com,
+      # never a separate value); contact_email, addon_repos (comma-separated
+      # catalog keys), selected_addons (comma-separated subset), region,
+      # gcp_project (falls back to vars.GCP_PROJECT).
+      - name: Onboard client (validate, provision, install, fetch creds)
+        if: github.event_name == 'repository_dispatch'
+        id: onboard
         env:
-          SMTP_CREDS: '${{ secrets.SMTP_CREDS }}'
+          GITHUB_TOKEN: ${{ secrets.ADDONS_GITHUB_TOKEN }}
+          PLATFORM_DNS_ZONE: ${{ vars.PLATFORM_DNS_ZONE }}
+          # Every repository_dispatch payload field is routed through env:
+          # and referenced below as a shell variable ("$VAR"), never as a
+          # raw ${{ }} expression inside the script body. ${{ }} substitutes
+          # as literal text into the script BEFORE bash parses it — with
+          # attacker/caller-controlled payload data (the PAT that triggers
+          # this event is explicitly meant to be held by "whoever operates
+          # onboarding", not just repo maintainers) that's a script-injection
+          # sink, not a safe value passthrough. $VAR shell-variable expansion
+          # is not.
+          PAYLOAD_CLIENT_SLUG: ${{ github.event.client_payload.client_slug }}
+          PAYLOAD_DOMAIN: ${{ github.event.client_payload.domain }}
+          PAYLOAD_SUBDOMAIN: ${{ github.event.client_payload.subdomain }}
+          PAYLOAD_CONTACT_EMAIL: ${{ github.event.client_payload.contact_email }}
+          PAYLOAD_ADDON_REPOS: ${{ github.event.client_payload.addon_repos }}
+          PAYLOAD_SELECTED_ADDONS: ${{ github.event.client_payload.selected_addons }}
+          PAYLOAD_REGION: ${{ github.event.client_payload.region || 'europe-west1' }}
+          PAYLOAD_GCP_PROJECT: ${{ github.event.client_payload.gcp_project || vars.GCP_PROJECT }}
+        run: |
+          # Explicit shell branching instead of a single-line `x && a || b`
+          # expression: that pattern silently falls through to the "else"
+          # branch (--use-subdomain) whenever `domain` is missing/mistyped
+          # for ANY reason, even if `subdomain` was never set either —
+          # onboard_client.py's own required-mutually-exclusive-group check
+          # can only catch that if neither flag gets passed at all.
+          ARGS=(--client-slug "$PAYLOAD_CLIENT_SLUG")
+          if [ -n "$PAYLOAD_DOMAIN" ]; then
+            ARGS+=(--domain "$PAYLOAD_DOMAIN")
+          elif [ "$PAYLOAD_SUBDOMAIN" = "true" ]; then
+            ARGS+=(--use-subdomain)
+          fi
+          # else: neither set — pass neither flag, so argparse's own
+          # required mutually-exclusive-group check fails loudly instead of
+          # silently defaulting to a platform subdomain.
+          ARGS+=(--contact-email "$PAYLOAD_CONTACT_EMAIL")
+          ARGS+=(--addon-repos "$PAYLOAD_ADDON_REPOS")
+          ARGS+=(--selected-addons "$PAYLOAD_SELECTED_ADDONS")
+          ARGS+=(--region "$PAYLOAD_REGION")
+          ARGS+=(--gcp-project "$PAYLOAD_GCP_PROJECT")
+          python3 scripts/onboard_client.py "${ARGS[@]}"
+
+      - name: Notify DevOps/Product (onboarding — admin credentials for handover)
+        if: always() && github.event_name == 'repository_dispatch'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.sendgrid.net
+          server_port: 465
+          username: apikey
+          password: ${{ secrets.SENDGRID_API_KEY }}
+          from: ${{ vars.NOTIFY_EMAIL_FROM }}
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          subject: "[Odoo SaaS] Client '${{ github.event.client_payload.client_slug }}' — onboarding ${{ job.status }}"
+          body: |
+            Client: ${{ github.event.client_payload.client_slug }}
+            Domain: ${{ github.event.client_payload.domain || format('{0}.nomowsoft.com', github.event.client_payload.client_slug) }}
+            Status: ${{ job.status }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Admin credentials (do NOT forward to the client — create and hand over
+            a separate low-privilege user instead):
+              user:     ${{ steps.onboard.outputs.admin_user }}
+              password: ${{ steps.onboard.outputs.admin_password }}

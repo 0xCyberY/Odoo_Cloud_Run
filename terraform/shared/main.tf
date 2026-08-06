@@ -9,7 +9,18 @@
 locals {
   clients_config = yamldecode(file("${path.root}/../../clients/clients.yaml"))
   clients        = local.clients_config.clients
-  client_domains = [for name, config in local.clients : config.domain if lookup(config, "domain", "") != ""]
+
+  # Effective domain per client: a literal 'domain', or the platform subdomain
+  # derived from 'subdomain_slug' (mutually exclusive — enforced by
+  # scripts/validate_clients.py R8). Mirrors _effective_domain() there so
+  # terraform and the Python validator agree on what "this client's domain" is.
+  client_effective_domain = {
+    for name, config in local.clients : name => (
+      lookup(config, "domain", "") != "" ? config.domain :
+      lookup(config, "subdomain_slug", "") != "" ? "${config.subdomain_slug}.nomowsoft.com" : null
+    )
+  }
+  client_domains = [for name, domain in local.client_effective_domain : domain if domain != null]
 
   # Comma-separated tenant DB list serviced by the Cron Runner
   odoo_databases = join(",", [for name, config in local.clients : config.database])
@@ -49,11 +60,11 @@ locals {
   # exact name, used when two clients share a first label).
   all_databases = [for name, config in local.clients : config.database]
   host_db_matches = {
-    for name, config in local.clients : name => [
+    for name, domain in local.client_effective_domain : name => [
       for db in local.all_databases : db
-      if db == split(".", trimprefix(config.domain, "www."))[0] || db == trimprefix(config.domain, "www.")
+      if db == split(".", trimprefix(domain, "www."))[0] || db == trimprefix(domain, "www.")
     ]
-    if lookup(config, "domain", "") != ""
+    if domain != null
   }
 
   # Tenant slug → db/user/secret map consumed by the pgbouncer sidecars
@@ -297,11 +308,18 @@ resource "google_compute_url_map" "alb_url_map" {
   }
 }
 
+# The proxy's cert source switches on var.enable_certificate_manager (default
+# false — see that variable's description for why this must stay a deliberate
+# flip, never a side effect of a routine apply). Terraform omits a list/string
+# attribute entirely when its value is null, so exactly one of
+# ssl_certificates / certificate_map is ever actually set on the API side.
 resource "google_compute_target_https_proxy" "alb_https_proxy" {
-  name             = "odoo-alb-https-proxy"
-  project          = var.gcp_project
-  url_map          = google_compute_url_map.alb_url_map.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.default_cert.id]
+  name    = "odoo-alb-https-proxy"
+  project = var.gcp_project
+  url_map = google_compute_url_map.alb_url_map.id
+
+  ssl_certificates = var.enable_certificate_manager ? null : [google_compute_managed_ssl_certificate.default_cert[0].id]
+  certificate_map  = var.enable_certificate_manager ? "//certificatemanager.googleapis.com/projects/${var.gcp_project}/locations/global/certificateMaps/${google_certificate_manager_certificate_map.default[0].name}" : null
 }
 
 resource "google_compute_global_forwarding_rule" "alb_forwarding_rule" {
@@ -313,15 +331,33 @@ resource "google_compute_global_forwarding_rule" "alb_forwarding_rule" {
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
-# Default Certificate (automatically extended with tenant domains).
-# Also the enforcement point for clients.yaml sanity — a duplicate or
-# ambiguous registration fails the plan/apply here with a clear message.
-#
-# The name embeds a hash of the domain set: certificates are immutable, so a
-# domain change means REPLACEMENT — and the old cert can't be destroyed while
-# the HTTPS proxy still uses it. A fresh name + create_before_destroy lets
+# ── Legacy shared-SAN certificate (today's live mechanism) ───────────────────
+# Active while enable_certificate_manager = false (the default). The name
+# embeds a hash of the domain set: certificates are immutable, so a domain
+# change means REPLACEMENT — and the old cert can't be destroyed while the
+# HTTPS proxy still uses it. A fresh name + create_before_destroy lets
 # Terraform create the new cert, repoint the proxy, then drop the old one.
+#
+# These two resources gained `count` when the Certificate Manager migration
+# added the enable_certificate_manager gate — that changes a resource's state
+# address from `type.name` to `type.name[0]`, which Terraform treats as a
+# DIFFERENT resource unless told otherwise. Without the `moved` blocks below,
+# the very next apply on live infra (acme/beta/mac) — for ANY reason, not
+# just flipping the flag — would plan to destroy the real cert and create a
+# new one, causing a real HTTPS outage while it reprovisions. `moved` makes
+# this a pure state-address migration: same cert, same name, no replacement.
+moved {
+  from = random_id.cert
+  to   = random_id.cert[0]
+}
+
+moved {
+  from = google_compute_managed_ssl_certificate.default_cert
+  to   = google_compute_managed_ssl_certificate.default_cert[0]
+}
+
 resource "random_id" "cert" {
+  count       = var.enable_certificate_manager ? 0 : 1
   byte_length = 3
   keepers = {
     domains = join(",", concat(["saas-dev.nomowsoft.com"], local.client_domains))
@@ -329,7 +365,8 @@ resource "random_id" "cert" {
 }
 
 resource "google_compute_managed_ssl_certificate" "default_cert" {
-  name    = "odoo-managed-cert-${random_id.cert.hex}"
+  count   = var.enable_certificate_manager ? 0 : 1
+  name    = "odoo-managed-cert-${random_id.cert[0].hex}"
   project = var.gcp_project
 
   managed {
@@ -338,20 +375,86 @@ resource "google_compute_managed_ssl_certificate" "default_cert" {
 
   lifecycle {
     create_before_destroy = true
-
-    precondition {
-      condition     = length(local.client_domains) == length(distinct(local.client_domains))
-      error_message = "Duplicate tenant domain in clients.yaml — two clients registered the same domain."
-    }
-    precondition {
-      condition     = length(local.all_databases) == length(distinct(local.all_databases))
-      error_message = "Duplicate database name in clients.yaml — two clients share one database."
-    }
-    precondition {
-      condition     = alltrue([for name, matches in local.host_db_matches : length(matches) == 1])
-      error_message = "Tenant host→database resolution broken (dbfilter ^(%d|%h)$): every domain must match exactly one database — name it after the subdomain, or after the full domain on first-label collisions. Run scripts/validate_clients.py for details."
-    }
   }
+}
+
+# ── Per-domain certificates (Certificate Manager) — Phase 1.5 migration ──────
+# Inert (for_each over an empty map / count = 0) while enable_certificate_manager
+# = false. Once flipped, replaces the single shared-SAN cert above: a
+# Google-managed cert only turns ACTIVE when ALL of its domains resolve, so
+# with ONE cert covering every tenant domain, one client slow to point DNS (or
+# entering a domain they don't control) blocked HTTPS renewal for every tenant
+# on the platform. Here each domain gets its own dns_authorization +
+# certificate + certificate_map_entry — a client who never completes DNS, or
+# squats a domain they don't own, only ever affects their own cert.
+#
+# clients.yaml sanity (duplicate slugs/domains/databases, host→database
+# resolution) is enforced unconditionally at apply time via the `check` block
+# below, regardless of which cert mechanism is active.
+locals {
+  # Every domain this platform terminates HTTPS for: the anchor domain
+  # (README §9 — needed for the cert to have at least one always-present
+  # domain independent of clients.yaml) plus one entry per client.
+  cert_domains = merge(
+    { "_platform_anchor" = "saas-dev.nomowsoft.com" },
+    local.client_effective_domain,
+  )
+  # for_each source for the Certificate Manager resources — empty (and
+  # therefore inert) unless the migration is deliberately enabled.
+  cert_manager_domains = var.enable_certificate_manager ? local.cert_domains : {}
+}
+
+check "clients_yaml_consistency" {
+  assert {
+    condition     = length(local.client_domains) == length(distinct(local.client_domains))
+    error_message = "Duplicate tenant domain in clients.yaml — two clients registered the same domain."
+  }
+  assert {
+    condition     = length(local.all_databases) == length(distinct(local.all_databases))
+    error_message = "Duplicate database name in clients.yaml — two clients share one database."
+  }
+  assert {
+    condition     = alltrue([for name, matches in local.host_db_matches : length(matches) == 1])
+    error_message = "Tenant host→database resolution broken (dbfilter ^(%d|%h)$): every domain must match exactly one database — name it after the subdomain, or after the full domain on first-label collisions. Run scripts/validate_clients.py for details."
+  }
+}
+
+# Gives each domain's owner a CNAME to add — simultaneously the
+# domain-ownership proof and the trigger for that domain's cert to activate.
+# onboard_client.py reads `dns_resource_record` for subdomain_slug clients to
+# self-create this CNAME in Cloud DNS; for `domain` clients it's surfaced to
+# the client to add manually (unchanged from today's flow).
+resource "google_certificate_manager_dns_authorization" "tenant" {
+  for_each = local.cert_manager_domains
+  name     = "dns-auth-${each.key}"
+  project  = var.gcp_project
+  domain   = each.value
+}
+
+resource "google_certificate_manager_certificate" "tenant" {
+  for_each = local.cert_manager_domains
+  name     = "cert-${each.key}"
+  project  = var.gcp_project
+
+  managed {
+    domains            = [each.value]
+    dns_authorizations = [google_certificate_manager_dns_authorization.tenant[each.key].id]
+  }
+}
+
+resource "google_certificate_manager_certificate_map" "default" {
+  count   = var.enable_certificate_manager ? 1 : 0
+  name    = "odoo-cert-map"
+  project = var.gcp_project
+}
+
+resource "google_certificate_manager_certificate_map_entry" "tenant" {
+  for_each     = local.cert_manager_domains
+  name         = "cert-map-entry-${each.key}"
+  project      = var.gcp_project
+  map          = google_certificate_manager_certificate_map.default[0].name
+  certificates = [google_certificate_manager_certificate.tenant[each.key].id]
+  hostname     = each.value
 }
 
 # 10. Platform Database User & Credentials (admin/fallback; pgbouncer frontend)

@@ -22,6 +22,22 @@ catalog:
     repo:   'github.com/nomowsoft/Odoo-Customization-Module.git'
     branch: '18.0'
 
+# Per-client schema:
+#   domain          OR subdomain_slug (mutually exclusive, exactly one required)
+#                     - domain: client's own domain; they add a CNAME (manual step)
+#                     - subdomain_slug: platform-issued '{slug}.nomowsoft.com',
+#                       self-managed DNS, no client step, no wait — MUST equal
+#                       this client's own key above (e.g. newco-corp:'s
+#                       subdomain_slug can only be 'newco-corp', never a
+#                       separate value; enforced by validate_clients.py R8)
+#   region, database, db_user, gcp_project   (as today)
+#   addon_repos       catalog keys this client is entitled to (billing)
+#   selected_addons   OPTIONAL subset of addon_repos to auto-install on
+#                     provisioning; anything entitled-but-unselected stays
+#                     installable via Apps, just not auto-installed
+#   contact_email     OPTIONAL, validated when present — never used as the
+#                     destination for admin credentials (those go to
+#                     NOTIFY_EMAIL_TO, a DevOps/Product distribution list)
 clients:
   acme-corp:
     # database is named after the subdomain (dbfilter ^(%d|%h)$): acme.nomowsoft.com → acme
@@ -32,7 +48,7 @@ clients:
     gcp_project: project-b85b49c5-5bdc-48ac-989
     # Catalog keys this client is entitled to (billing source of truth).
     # Selling an addon = add its key here + `terraform -chdir=terraform/shared apply`.
-    addon_repos: [Human-Resources, Accounting]
+    addon_repos: [Human-Resources, Accounting, Odoo-Customization-Module]
 
   beta-corp:
     domain:      beta.nomowsoft.com
@@ -40,7 +56,7 @@ clients:
     database:    beta
     db_user:     beta_production
     gcp_project: project-b85b49c5-5bdc-48ac-989
-    addon_repos: [Odoo-Customization-Module]
+    addon_repos: [Human-Resources, Accounting, Odoo-Customization-Module]
 
   mac-corp:
     domain:      mac.nomowsoft.com
@@ -48,4 +64,4 @@ clients:
     database:    mac
     db_user:     mac_production
     gcp_project: project-b85b49c5-5bdc-48ac-989
-    addon_repos: [Human-Resources]
+    addon_repos: [Human-Resources, Accounting, Odoo-Customization-Module]
