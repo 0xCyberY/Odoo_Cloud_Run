@@ -64,7 +64,8 @@ RUN test -f /opt/extra-addons/session_redis/__manifest__.py \
 COPY addons/ /mnt/platform-addons/
 RUN test -f /mnt/platform-addons/gcs_attachment_default/__manifest__.py \
     && test -f /mnt/platform-addons/platform_dblist/__manifest__.py \
-    && test -f /mnt/platform-addons/addon_entitlement/__manifest__.py
+    && test -f /mnt/platform-addons/addon_entitlement/__manifest__.py \
+    && test -f /mnt/platform-addons/platform_cron_safety/__manifest__.py
 
 # ==============================================================================
 # STAGE 2: Pooled Tier Image — full addon catalog for ALL tenants

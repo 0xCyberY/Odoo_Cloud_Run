@@ -73,8 +73,12 @@ fi
 # Env-driven database discovery: core list_dbs() only shows databases OWNED by
 # the connecting role, and tenant DBs are owned by their own users (Fix #4) —
 # without this, every host lands on the database selector.
+# platform_cron_safety patches ThreadedServer.cron_thread against a core
+# Odoo race (unlocked iteration over Registry.registries.d) that otherwise
+# permanently kills a cron thread — only relevant where cron threads run
+# (ODOO_MODE=cron, same condition ODOO_DATABASES is required under).
 if [ -n "${ODOO_DATABASES:-}" ]; then
-    SERVER_WIDE_MODULES="${SERVER_WIDE_MODULES},platform_dblist"
+    SERVER_WIDE_MODULES="${SERVER_WIDE_MODULES},platform_dblist,platform_cron_safety"
 fi
 
 # ── Write odoo.conf ──────────────────────────────────────────────────────────
