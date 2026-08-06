@@ -29,7 +29,16 @@ Enforcement model:
   (server/automated actions run sudo'd) and no interactive-only exemption
   (cron runs without a request).
 - base_import_module is blocklisted outright (module-zip sideloading =
-  arbitrary code execution on the shared workers).
+  arbitrary code execution on the shared workers) — and UNLIKE catalog/plan
+  entitlement, this check has NO operator exemption. Operators must be able
+  to bypass plan gates to provision paid modules, but nothing — not even an
+  operator job — may ever install this module. Odoo's own auto_install
+  resolution can pull it into an otherwise-legitimate batch as a side effect
+  (e.g. installing fs_attachment auto-installs it once its deps are
+  satisfied); write() vetoes it by quietly excluding it from that batch
+  rather than raising, so unrelated modules in the same write still install —
+  raising would abort the whole batch. Explicit install attempts
+  (button_install/_entitlement_check_install) still raise loudly.
 - This module refuses its own uninstall.
 - A daily cron logs ENTITLEMENT_VIOLATION for installed-but-unentitled
   modules; terraform/shared/monitoring.tf turns that into an alert.
@@ -209,17 +218,25 @@ class IrModuleModule(models.Model):
     # and, deliberately, no "interactive only" exemption: tenant ir.cron code
     # runs without a request and must still be gated.
     def _entitlement_check_install(self):
-        if _operator_context():
-            return
-        blocked = self._entitlement_blocked_names()
-        if not blocked:
-            return
         # sudo: the closure must include dependencies our own filter hides
         closure = seen = self.sudo()
         while closure:
             dep_names = closure.mapped("dependencies_id.name")
             closure = self.sudo().search([("name", "in", dep_names)]) - seen
             seen |= closure
+        # Platform blocklist is checked unconditionally, even in operator
+        # context: this is a hard security control (arbitrary code execution
+        # risk), not a plan/entitlement gate operators must bypass to
+        # provision paid modules. An explicit install attempt (button click,
+        # -i on the CLI) is a deliberate ask, so loudly deny it here.
+        blocklisted = sorted(m.name for m in seen if m.name in PLATFORM_BLOCKLIST)
+        if blocklisted:
+            _raise_not_entitled(blocklisted)
+        if _operator_context():
+            return
+        blocked = self._entitlement_blocked_names()
+        if not blocked:
+            return
         offenders = sorted(m.name for m in seen if m.name in blocked)
         if offenders:
             _raise_not_entitled(offenders)
@@ -273,13 +290,24 @@ class IrModuleModule(models.Model):
         # Close the smuggle route: flipping state to 'to install'/'to upgrade'
         # (e.g. from a tenant ir.cron) would get a blocked module processed by
         # the next fleet migration. Gated everywhere but the operator Jobs.
-        if (
-            not _operator_context()
-            and vals.get("state") in ("to install", "to upgrade", "installed")
-        ):
-            offenders = self._entitlement_offenders(self)
-            if offenders:
-                _raise_not_entitled(offenders)
+        if vals.get("state") in ("to install", "to upgrade", "installed"):
+            # Odoo's own auto_install resolution can silently pull a
+            # blocklisted module into an otherwise-legitimate batch (e.g.
+            # installing fs_attachment auto-installs base_import_module once
+            # its deps happen to be satisfied) — no malicious actor, just
+            # core's default graph resolution. Veto quietly by excluding it
+            # from the write instead of raising: raising here would abort
+            # the WHOLE batched write, including unrelated entitled modules
+            # installing alongside it in the same call. Unconditional — no
+            # operator exemption, unlike the entitlement check below: this is
+            # the security control from the module docstring, not a plan gate.
+            blocklisted = self.filtered(lambda m: m.name in PLATFORM_BLOCKLIST)
+            remaining = self - blocklisted
+            if not _operator_context():
+                offenders = remaining._entitlement_offenders(remaining)
+                if offenders:
+                    _raise_not_entitled(offenders)
+            return super(IrModuleModule, remaining).write(vals)
         return super().write(vals)
 
     # ── Detection (daily cron — see data/ir_cron.xml) ────────────────────────
