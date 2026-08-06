@@ -794,10 +794,16 @@ resource "google_project_iam_member" "github_actions_deployer_cloudbuild" {
   member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
 
-resource "google_project_iam_member" "github_actions_deployer_artifactregistry" {
-  project = var.gcp_project
-  role    = "roles/artifactregistry.writer"
-  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+# repoAdmin (not writer) and repo-scoped (not project-wide): moving the
+# `latest` tag onto a new image (gcloud artifacts docker tags add) deletes
+# the old tag reference first, which needs artifactregistry.tags.delete —
+# roles/artifactregistry.writer doesn't include it, repoAdmin does.
+resource "google_artifact_registry_repository_iam_member" "github_actions_deployer_artifactregistry" {
+  project    = var.gcp_project
+  location   = google_artifact_registry_repository.odoo_repo.location
+  repository = google_artifact_registry_repository.odoo_repo.repository_id
+  role       = "roles/artifactregistry.repoAdmin"
+  member     = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
 
 resource "google_project_iam_member" "github_actions_deployer_run" {
