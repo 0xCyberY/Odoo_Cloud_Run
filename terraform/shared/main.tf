@@ -32,6 +32,9 @@ locals {
   # options, directory_path, use_as_default_for_attachments) are server-env
   # driven when server_environment is installed, which is why they must come
   # from here rather than the fs.storage DB record.
+  # Mirrored in terraform/main.tf's local.server_env_config for the per-tenant
+  # init/migration Cloud Run Jobs (separate Terraform state, no cross-stack
+  # variable sharing) — keep both copies in sync if this schema changes.
   server_env_config = <<-EOT
     [fs_storage.gcs_att]
     protocol=gcs

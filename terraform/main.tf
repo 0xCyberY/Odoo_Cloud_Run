@@ -41,6 +41,29 @@ locals {
     app    = "odoo"
     tenant = var.client_slug
   }
+
+  # Mirrors terraform/shared/main.tf's local.server_env_config (same
+  # [fs_storage.gcs_att] template, {db_name} substituted per-tenant by the
+  # OCA server_environment module at runtime). The shared and per-tenant
+  # Terraform stacks are separate states with no cross-stack variable
+  # sharing, so this is duplicated rather than remote-state-read — it's a
+  # simple, deterministic string, lower-risk to copy than to wire a
+  # cross-stack read for. Keep both copies in sync if the schema changes.
+  #
+  # Without this, the init/migration Cloud Run Jobs below never had GCS
+  # routing configured at all (only the three long-running services in
+  # terraform/shared did) — every module install/upgrade run through these
+  # Jobs wrote attachments (menu icons, compiled assets, ...) to the job
+  # container's local disk, which is destroyed within seconds of the job
+  # finishing. That's the root cause of attachments recurringly vanishing
+  # after every fleet migration, not just a one-time bring-up artifact.
+  server_env_config = <<-EOT
+    [fs_storage.gcs_att]
+    protocol=gcs
+    options={"token": "google_default", "project": "${var.gcp_project}"}
+    directory_path=${var.gcp_project}-{db_name}-corp-odoo-attachments
+    use_as_default_for_attachments=True
+  EOT
 }
 
 # ── Tenant Database & Odoo Admin Credentials ─────────────────────────────────
@@ -157,7 +180,8 @@ module "cloud_run_init_job" {
   ]
 
   env_extra = {
-    GCS_BUCKET = google_storage_bucket.attachments.name
+    GCS_BUCKET        = google_storage_bucket.attachments.name
+    SERVER_ENV_CONFIG = local.server_env_config
   }
 }
 
@@ -191,7 +215,8 @@ module "cloud_run_migration_job" {
   ]
 
   env_extra = {
-    GCS_BUCKET = google_storage_bucket.attachments.name
+    GCS_BUCKET        = google_storage_bucket.attachments.name
+    SERVER_ENV_CONFIG = local.server_env_config
   }
 }
 
