@@ -27,23 +27,23 @@ on:
     inputs:
       client_slug:
         required: true
-        description: 'e.g. acme-corp'
+        description: 'Client to provision, e.g. acme-corp'
       domain:
         required: false
-        description: 'e.g. acme.nomowsoft.com'
+        description: 'New client only: client domain, e.g. acme.nomowsoft.com'
       contact_email:
         required: false
-        description: 'e.g. ops@acme.com'
+        description: 'New client only: onboarding contact, e.g. ops@acme.com'
       addon_repos:
         required: false
-        description: 'e.g. Human-Resources,Accounting'
+        description: 'New client only: catalog keys entitled to, e.g. Human-Resources,Accounting'
       selected_addons:
         required: false
-        description: 'e.g. Human-Resources'
+        description: 'New client only: subset to auto-install, e.g. Human-Resources'
       region:
         required: false
         default: 'europe-west1'
-        description: 'e.g. europe-west1'
+        description: 'New client only: GCP region, e.g. europe-west1'
   repository_dispatch:
     types: [client-onboarding]
 

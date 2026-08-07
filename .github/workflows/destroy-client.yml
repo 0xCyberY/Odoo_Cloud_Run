@@ -11,7 +11,7 @@ on:
     inputs:
       client_slug:
         required: true
-        description: 'e.g. acme-corp'
+        description: 'Client to tear down, e.g. acme-corp'
   repository_dispatch:
     types: [client-offboarding]
 
