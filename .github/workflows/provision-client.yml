@@ -30,20 +30,20 @@ on:
         description: 'e.g. acme-corp'
       domain:
         required: false
-        description: 'New client only (ignored when client_slug already exists in clients.yaml): the client''s domain, e.g. acme.nomowsoft.com or acme.com — DNS stays with the client''s own provider, added manually after onboarding.'
+        description: 'e.g. acme.nomowsoft.com'
       contact_email:
         required: false
-        description: 'New client only: onboarding contact email.'
+        description: 'e.g. ops@acme.com'
       addon_repos:
         required: false
-        description: 'New client only: comma-separated catalog keys this client is entitled to (see the catalog: section in clients/clients.yaml).'
+        description: 'e.g. Human-Resources,Accounting'
       selected_addons:
         required: false
-        description: 'New client only: comma-separated subset of addon_repos to auto-install at init.'
+        description: 'e.g. Human-Resources'
       region:
         required: false
         default: 'europe-west1'
-        description: 'New client only: GCP region.'
+        description: 'e.g. europe-west1'
   repository_dispatch:
     types: [client-onboarding]
 
