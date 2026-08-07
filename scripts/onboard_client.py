@@ -104,13 +104,21 @@ class ClientOnboarder:
         if not self.domain:
             raise ValueError("--domain is required")
 
-        self.database = self._first_label(self.domain)
+        self.database = self._host(self.domain)[:63]
         self.db_user = db_user or f"{self.client_slug.replace('-', '_')}_production"
 
     @staticmethod
-    def _first_label(domain):
-        host = domain[4:] if domain.startswith("www.") else domain
-        return host.split(".")[0]
+    def _host(domain):
+        # Full host (www. stripped), not the first label — matches dbfilter's
+        # %h branch (odoo-v18/entrypoint.sh), and is unique-by-construction
+        # since validate_clients.py R2 already guarantees domains are unique.
+        # Truncated to Postgres/Cloud SQL's 63-byte NAMEDATALEN limit, which
+        # they'd otherwise apply silently themselves. If a domain is long
+        # enough to actually truncate, the result no longer equals the full
+        # host exactly, so validate_clients.py R5 will hard-fail the entry
+        # ("host matches NO database") instead of onboarding continuing with
+        # a name that dbfilter can never route to — that's deliberate.
+        return domain[4:] if domain.startswith("www.") else domain
 
     # ── Step 1: validate ─────────────────────────────────────────────────────
     def _client_entry(self):

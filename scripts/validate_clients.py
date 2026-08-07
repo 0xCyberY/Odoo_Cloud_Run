@@ -29,6 +29,21 @@ Rules (dbfilter = ^(%d|%h)$ — Option A hybrid):
   R9  contact_email, when present, looks like an email address
   R10 selected_addons is a subset of the client's own addon_repos —
       auto-install can't select something the client isn't entitled to
+  R11 database name must fit Postgres/Cloud SQL's 63-byte NAMEDATALEN
+      limit — they truncate silently otherwise, which R5 would eventually
+      catch as an opaque "host matches NO database" failure; this gives
+      the real reason up front
+  R12 client_slug must be a valid RFC1035-style label (lowercase
+      letters/digits/hyphens, starting with a letter, not ending in a
+      hyphen) — it's baked directly into the per-tenant GCS bucket, Cloud
+      Run Job names, and Secret Manager secret IDs, all of which reject
+      anything else with a raw GCP API error instead of this clear one.
+      Bans underscores as a side effect, which also makes db_user
+      (slug.replace('-', '_')) collision-free between distinct slugs.
+  R13 resource names derived from client_slug (the GCS attachments bucket,
+      the longest Cloud Run Job name) must fit GCP's 63-character RFC1035
+      limit — checked against the actual computed name, not a guessed slug
+      length cap, since the budget depends on how long gcp_project is too
 
 Usage: python3 scripts/validate_clients.py [path/to/clients.yaml]
 Exit code 1 with a per-violation message on failure.
@@ -57,6 +72,14 @@ _DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOMAIN_RE = re.compile(rf"^{_DNS_LABEL}(?:\.{_DNS_LABEL})+$")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# client_slug: RFC1035-style label — lowercase letters/digits/hyphens, must
+# start with a letter, must not end with a hyphen. It's used verbatim in the
+# per-tenant GCS bucket name, Cloud Run Job names, and Secret Manager secret
+# IDs (R12); none of those accept uppercase or underscores.
+SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
+
+GCP_RESOURCE_NAME_LIMIT = 63
 
 
 def _host(domain):
@@ -192,6 +215,45 @@ def validate(config, raw_text=None):
                     f"R10 [{slug}] selected_addons references '{entry}' which isn't in "
                     f"this client's own addon_repos (entitled: {sorted(entitled) or '(none)'})"
                 )
+
+    # R11 — database name must fit Postgres/Cloud SQL's 63-byte NAMEDATALEN
+    # limit (onboard_client.py derives it from the full domain, which can
+    # exceed 63 bytes for long hostnames).
+    for slug, c in clients.items():
+        db = c.get("database")
+        if isinstance(db, str) and len(db.encode()) > 63:
+            errors.append(
+                f"R11 [{slug}] database name '{db}' is {len(db.encode())} bytes, over "
+                "Postgres's 63-byte limit — shorten the domain or pass an explicit --database"
+            )
+
+    # R12 — client_slug must be a safe RFC1035-style label.
+    for slug in clients:
+        if not SLUG_RE.match(slug):
+            errors.append(
+                f"R12 [{slug}] client_slug must be lowercase letters/digits/hyphens, "
+                "start with a letter, and not end with a hyphen"
+            )
+
+    # R13 — resource names built from client_slug must fit GCP's 63-character
+    # limit. Computed from the actual derived name (like R11), not a guessed
+    # slug-length cap, since the budget also depends on gcp_project's length.
+    for slug, c in clients.items():
+        project = c.get("gcp_project")
+        if not project:
+            continue
+        bucket = f"{project}-{slug}-odoo-attachments"
+        if len(bucket) > GCP_RESOURCE_NAME_LIMIT:
+            errors.append(
+                f"R13 [{slug}] GCS bucket name '{bucket}' is {len(bucket)} chars, over "
+                "GCP's 63-char limit — shorten client_slug"
+            )
+        longest_job = f"{slug}-odoo-job-migration"
+        if len(longest_job) > GCP_RESOURCE_NAME_LIMIT:
+            errors.append(
+                f"R13 [{slug}] Cloud Run Job name '{longest_job}' is {len(longest_job)} chars, "
+                "over GCP's 63-char limit — shorten client_slug"
+            )
 
     return errors
 

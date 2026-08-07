@@ -82,6 +82,7 @@ Async / control plane:
 15. [Fixes legend](#15-fixes-legend--v1-weakness--v2-solution)
 16. [Deploy-time gotchas — hit once, now handled in code](#16-deploy-time-gotchas--hit-once-now-handled-in-code)
 17. [Debugging production — read-only queries & one-off fixes](#17-debugging-production--read-only-queries--one-off-fixes)
+18. [clients.yaml validation rules & naming standards](#18-clientsyaml-validation-rules--naming-standards)
 
 ---
 
@@ -318,10 +319,17 @@ a request matches a database named either way:
 | `example.com` | `example` | Apex domains: first label works the same |
 | `super.droob.com` + `super.example.com` | `super.droob.com` / `super.example.com` | First-label **collision**: both DBs use the full domain; a DB named just `super` must not exist |
 
+Both forms are valid to `dbfilter`, but `onboard_client.py` **always** defaults
+new clients to the full-host form (`_host(domain)`, truncated to Postgres's
+63-byte limit) rather than the first label — this makes `database` unique by
+construction for any two distinct domains (R2 already guarantees domains are
+unique), instead of only being unique until two clients happen to share a
+first label. Full rule list and naming standards: §18.
+
 These rules are **enforced automatically** — a duplicate or ambiguous
 registration is rejected before any infrastructure changes, at three gates:
 
-1. `scripts/validate_clients.py` — run by `provision.py` and
+1. `scripts/validate_clients.py` (§18) — run by `provision.py` and
    `prepare_addons.py` (so every CI build and every onboarding fails fast).
    Checks: duplicate slugs (YAML would silently drop one!), duplicate domains,
    duplicate databases/db_users, and that every host resolves to exactly one
@@ -1498,3 +1506,66 @@ for m in menus:
         m.write({'web_icon': m.web_icon})
 env.cr.commit()
 ```
+
+---
+
+## 18. clients.yaml Validation Rules & Naming Standards
+
+`scripts/validate_clients.py` is the single source of truth for what makes a
+`clients.yaml` entry legal. It runs on every `provision.py`/`prepare_addons.py`
+invocation and inside `onboard_client.py`'s validation step, re-checking the
+**whole file** with the candidate entry merged in — so a bad entry is rejected
+before any GCP API call or `terraform apply`, never partway through one.
+`terraform/shared`'s `check "clients_yaml_consistency"` block re-enforces the
+domain/database/db_user uniqueness rules a second time at `plan`/`apply`, as a
+backstop for any path that bypasses the Python script.
+
+### Rules
+
+| # | Checks | Why |
+|---|---|---|
+| R1 | Client slugs are unique | YAML silently keeps only the last of two duplicate keys — re-scanned on raw text since `yaml.safe_load` already lost the duplicate by the time Python sees it |
+| R2 | Domains are unique across clients | Two clients serving the same host is a routing hazard, not just a data-hygiene issue |
+| R3 | Database names are unique across clients | Two tenants pointed at one database is a tenant-isolation breach |
+| R4 | `db_user` names are unique across clients | Same reasoning as R3, one layer down |
+| R5 | Every domain resolves to **exactly one** database under `dbfilter = ^(%d|%h)$` — `database` must equal either the domain's first label or its full host | Zero matches → tenant unreachable. Two+ matches → ambiguous, a real data hazard |
+| R6 | Catalog entries are well-formed; the key `common` is reserved for the `common_addon_repo` clone directory | Prevents a catalog entry from shadowing the always-cloned common repo |
+| R7 | Every `addon_repos` entry is a string referencing an existing catalog key | Entitlements are rendered from these references — an unknown key means silently-wrong entitlement data |
+| R8 | `domain` is required and must be a syntactically valid hostname (`DOMAIN_RE`) | Security boundary, not hygiene: `domain` feeds into generated YAML/tfvars text and a comma-joined `gcloud run jobs execute --args=` string, so non-hostname characters must never reach either |
+| R9 | `contact_email`, when present, looks like an email address | Basic shape check before it's used for onboarding notifications |
+| R10 | `selected_addons` is a subset of the client's own `addon_repos` | Auto-install can't select something the client isn't entitled to |
+| R11 | `database` fits Postgres/Cloud SQL's 63-byte `NAMEDATALEN` limit | Postgres truncates silently past 63 bytes; without this check, that surfaces later as R5's opaque "host matches NO database", not a clear reason |
+| R12 | `client_slug` is a valid RFC1035-style label — lowercase letters/digits/hyphens, starts with a letter, doesn't end in a hyphen | It's baked directly into the per-tenant GCS bucket name, Cloud Run Job names, and Secret Manager secret IDs, all of which reject anything else with a raw GCP API error instead of this clear one. Banning underscores as a side effect also makes `db_user` (`slug.replace('-', '_')`) collision-free between any two distinct slugs |
+| R13 | Resource names derived from `client_slug` (the GCS attachments bucket, the longest Cloud Run Job name) fit GCP's 63-character limit | Checked against the actual computed name (like R11), not a guessed slug-length cap — the real budget also depends on how long `gcp_project` is |
+
+### Naming standards these rules enforce
+
+| Field | Derivation (`onboard_client.py` default) | Consumers |
+|---|---|---|
+| `client_slug` | Caller-supplied, not derived from anything — must satisfy R1/R12 | `clients/<slug>.tfvars`, per-tenant Secret Manager secrets (`<slug>-admin-user`, `<slug>-admin-password`, `<slug>-db-password`), Cloud Run Job names (`<slug>-odoo-job-init`/`-migration`/`-db-setup`), the GCS attachments bucket |
+| `domain` | Caller-supplied — must satisfy R2/R8 | dbfilter routing (`%h`), the shared SSL certificate's SAN list (or its own Certificate Manager cert once `enable_certificate_manager=true`) |
+| `database` | Full host with a leading `www.` stripped, truncated to 63 bytes (§4's "Host → database naming rules" table) — must satisfy R3/R5/R11 | `dbfilter = ^(%d|%h)$` tenant routing, `pgbouncer`'s per-tenant `dbname=`, `addon_entitlement`'s `ODOO_ENTITLEMENTS` map key |
+| `db_user` | `client_slug` with `-` replaced by `_`, plus `_production` — must satisfy R4 | The tenant's least-privilege Postgres role, `pgbouncer`'s per-tenant `user=` |
+
+Three reserved `client_slug` values already exist as **hardcoded** literals in
+`terraform/shared/main.tf` for the platform's own shared services — `pooled`,
+`websocket`, `cron-runner`. They aren't rejected by any rule above today
+(the per-tenant Terraform workspace, `terraform/main.tf`, only creates a
+database, a bucket, and three batch Jobs from `client_slug` — it never
+invokes the `cloud-run-odoo` module those three shared services use, so
+there's no actual resource-name collision path). Still worth knowing before
+ever repurposing those three names for something else.
+
+### Cross-workflow safety
+
+`provision-client.yml`, `destroy-client.yml`, and `deploy-fleet.yml` all share
+one `concurrency: group: terraform-apply` — deliberately. All three mutate the
+same live shared Cloud Run services (`pooled-odoo`, `websocket-odoo`,
+`cron-runner-odoo`): the first two via `terraform apply` on `terraform/shared`
+(which re-renders `ODOO_ENTITLEMENTS`/`tenant_db_map` and rolls a new revision
+on every onboarding/offboarding), `deploy-fleet.yml` via direct `gcloud`
+image/traffic updates. Giving `deploy-fleet.yml` its own concurrency group
+would let a fleet deploy's canary rollout race an onboarding-triggered
+revision on the same services — GitHub Actions serializes same-group runs
+(queued, not cancelled — `cancel-in-progress: false`), so sharing the group
+is what prevents that.

@@ -16,7 +16,14 @@ on:
         description: 'Resume from this client, blank = all tenants, e.g. acme-corp'
 
 concurrency:
-  group: deploy-fleet
+  # Same group as provision-client.yml/destroy-client.yml, deliberately: all
+  # three mutate the same live shared Cloud Run services (pooled-odoo,
+  # websocket-odoo, cron-runner-odoo) — one via terraform apply on
+  # terraform/shared (which re-renders ODOO_ENTITLEMENTS/tenant_db_map and
+  # rolls a new revision on every onboarding/offboarding), the other via
+  # direct gcloud image/traffic updates. Letting them run concurrently risked
+  # two independent processes racing revisions on the same services.
+  group: terraform-apply
   cancel-in-progress: false
 
 env:
