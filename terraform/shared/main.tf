@@ -10,14 +10,12 @@ locals {
   clients_config = yamldecode(file("${path.root}/../../clients/clients.yaml"))
   clients        = local.clients_config.clients
 
-  # Effective domain per client: a literal 'domain', or the platform subdomain
-  # derived from 'subdomain_slug' (mutually exclusive — enforced by
-  # scripts/validate_clients.py R8). Mirrors _effective_domain() there so
-  # terraform and the Python validator agree on what "this client's domain" is.
+  # Effective domain per client. Mirrors _effective_domain() in
+  # scripts/validate_clients.py so terraform and the Python validator agree
+  # on what "this client's domain" is.
   client_effective_domain = {
     for name, config in local.clients : name => (
-      lookup(config, "domain", "") != "" ? config.domain :
-      lookup(config, "subdomain_slug", "") != "" ? "${config.subdomain_slug}.nomowsoft.com" : null
+      lookup(config, "domain", "") != "" ? config.domain : null
     )
   }
   client_domains = [for name, domain in local.client_effective_domain : domain if domain != null]
@@ -421,9 +419,9 @@ check "clients_yaml_consistency" {
 
 # Gives each domain's owner a CNAME to add — simultaneously the
 # domain-ownership proof and the trigger for that domain's cert to activate.
-# onboard_client.py reads `dns_resource_record` for subdomain_slug clients to
-# self-create this CNAME in Cloud DNS; for `domain` clients it's surfaced to
-# the client to add manually (unchanged from today's flow).
+# onboard_client.py reads `dns_resource_record` and surfaces it to the client
+# to add manually at their own DNS provider — this repo never manages a
+# client's DNS itself.
 resource "google_certificate_manager_dns_authorization" "tenant" {
   for_each = local.cert_manager_domains
   name     = "dns-auth-${each.key}"
@@ -840,7 +838,7 @@ resource "google_workflows_workflow" "fleet_migration" {
 }
 
 # 20. GitHub Actions CI/CD — Workload Identity Federation
-# deploy-fleet.yml and update-addon.yml (google-github-actions/auth) need a
+# deploy-fleet.yml (google-github-actions/auth) needs a
 # workload_identity_provider + service_account. Neither existed after the
 # 2026-08-03 project rebuild — the workflows failed with "must specify
 # exactly one of workload_identity_provider or credentials_json" because both
@@ -851,7 +849,7 @@ resource "google_iam_workload_identity_pool" "github_actions" {
   workload_identity_pool_id = "github-actions-pool"
   project                   = var.gcp_project
   display_name              = "GitHub Actions"
-  description               = "OIDC federation for this repo's CI/CD workflows (deploy-fleet, update-addon)"
+  description               = "OIDC federation for this repo's CI/CD workflows (deploy-fleet)"
 }
 
 resource "google_iam_workload_identity_pool_provider" "github_actions" {
@@ -887,7 +885,7 @@ resource "google_service_account_iam_member" "github_actions_wif_binding" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
 }
 
-# Roles actually exercised by deploy-fleet.yml / update-addon.yml:
+# Roles actually exercised by deploy-fleet.yml:
 #   cloudbuild.builds.editor  — gcloud builds submit
 #   artifactregistry.writer   — gcloud artifacts docker tags add
 #   run.admin                 — gcloud run services/jobs update, jobs execute

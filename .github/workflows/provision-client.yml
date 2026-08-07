@@ -1,10 +1,20 @@
 name: Provision client
 # Two independent triggers, one job:
-#   workflow_dispatch  — manual path: calls scripts/provision.py directly for
-#     an EXISTING clients.yaml entry, instead of duplicating terraform/gcloud
-#     steps in YAML. CI inherits the same state-drift guard
-#     (_reconcile_database_drift) as local runs, one implementation instead
-#     of two.
+#   workflow_dispatch  — manual path, branches on whether client_slug is
+#     already in clients.yaml (see "Determine whether client_slug already
+#     exists" step below):
+#       exists     -> scripts/provision.py, re-provisioning/reconciling an
+#                     EXISTING entry (drift guard: _reconcile_database_drift),
+#                     same as before. The addon_repos/selected_addons/etc.
+#                     inputs below are ignored on this path — the entry's
+#                     own clients.yaml values already govern it.
+#       not exists -> scripts/onboard_client.py, same as the automated path
+#                     below, using the addon_repos/selected_addons/domain/
+#                     contact_email/region inputs. Lets a human onboard a
+#                     client from the Actions UI without needing a PAT to
+#                     fire repository_dispatch. DNS (A record + Certificate
+#                     Manager CNAME) is always a manual step at the client's
+#                     own DNS provider — this repo doesn't manage DNS itself.
 #   repository_dispatch (types: client-onboarding) — automated path: calls
 #     scripts/onboard_client.py, which adds the clients.yaml entry itself
 #     from client_payload, then runs the whole provisioning flow. Fired
@@ -19,8 +29,21 @@ on:
         required: true
         description: 'e.g. acme-corp'
       domain:
-        required: true
-        description: 'e.g. acme.nomowsoft.com'
+        required: false
+        description: 'New client only (ignored when client_slug already exists in clients.yaml): the client''s domain, e.g. acme.nomowsoft.com or acme.com — DNS stays with the client''s own provider, added manually after onboarding.'
+      contact_email:
+        required: false
+        description: 'New client only: onboarding contact email.'
+      addon_repos:
+        required: false
+        description: 'New client only: comma-separated catalog keys this client is entitled to (see the catalog: section in clients/clients.yaml).'
+      selected_addons:
+        required: false
+        description: 'New client only: comma-separated subset of addon_repos to auto-install at init.'
+      region:
+        required: false
+        default: 'europe-west1'
+        description: 'New client only: GCP region.'
   repository_dispatch:
     types: [client-onboarding]
 
@@ -61,12 +84,21 @@ jobs:
         run: pip install -r scripts/requirements.txt -q
 
       # ── Manual path (workflow_dispatch) ─────────────────────────────────
-      - name: Provision client (shared infra, terraform, DB init)
+      - name: Determine whether client_slug already exists in clients.yaml
         if: github.event_name == 'workflow_dispatch'
+        id: check_client
+        env:
+          INPUT_CLIENT_SLUG: ${{ inputs.client_slug }}
+        run: |
+          python3 -c "import os, sys, yaml; c = yaml.safe_load(open('clients/clients.yaml')) or {}; sys.exit(0 if os.environ['INPUT_CLIENT_SLUG'] in (c.get('clients') or {}) else 1)" \
+            && echo "exists=true" >> "$GITHUB_OUTPUT" || echo "exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Provision client (existing entry — shared infra, terraform, DB init)
+        if: github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true'
         run: python3 scripts/provision.py --client ${{ inputs.client_slug }} --init-db
 
       - name: Notify
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
@@ -82,19 +114,67 @@ jobs:
             Status: ${{ job.status }}
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
+      # client_slug not found above -> treat this as a manual onboarding run,
+      # same script and same addon auto-install behavior as the automated
+      # repository_dispatch path below (selected_addons resolved to real
+      # module names and passed in the init job's combined -i list — see
+      # onboard_client.py's run_init_job/_auto_install_list).
+      - name: Onboard client (new entry — validate, provision, install, fetch creds)
+        if: github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false'
+        id: onboard_manual
+        env:
+          GITHUB_TOKEN: ${{ secrets.ADDONS_GITHUB_TOKEN }}
+          # Same $VAR-not-${{ }} discipline as the repository_dispatch step
+          # below — workflow_dispatch inputs are free-text too.
+          INPUT_CLIENT_SLUG: ${{ inputs.client_slug }}
+          INPUT_DOMAIN: ${{ inputs.domain }}
+          INPUT_CONTACT_EMAIL: ${{ inputs.contact_email }}
+          INPUT_ADDON_REPOS: ${{ inputs.addon_repos }}
+          INPUT_SELECTED_ADDONS: ${{ inputs.selected_addons }}
+          INPUT_REGION: ${{ inputs.region }}
+        run: |
+          ARGS=(--client-slug "$INPUT_CLIENT_SLUG")
+          ARGS+=(--domain "$INPUT_DOMAIN")
+          ARGS+=(--contact-email "$INPUT_CONTACT_EMAIL")
+          ARGS+=(--addon-repos "$INPUT_ADDON_REPOS")
+          ARGS+=(--selected-addons "$INPUT_SELECTED_ADDONS")
+          ARGS+=(--region "$INPUT_REGION")
+          python3 scripts/onboard_client.py "${ARGS[@]}"
+
+      - name: Notify DevOps/Product (manual onboarding — admin credentials for handover)
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.sendgrid.net
+          server_port: 465
+          username: apikey
+          password: ${{ secrets.SENDGRID_API_KEY }}
+          from: ${{ vars.NOTIFY_EMAIL_FROM }}
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          subject: "[Odoo SaaS] Client '${{ inputs.client_slug }}' — onboarding ${{ job.status }}"
+          body: |
+            Client: ${{ inputs.client_slug }}
+            Domain: ${{ inputs.domain }}
+            Status: ${{ job.status }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Admin credentials (do NOT forward to the client — create and hand over
+            a separate low-privilege user instead):
+              user:     ${{ steps.onboard_manual.outputs.admin_user }}
+              password: ${{ steps.onboard_manual.outputs.admin_password }}
+
       # ── Automated path (repository_dispatch: client-onboarding) ────────
-      # client_payload fields: client_slug (required); exactly one of domain
-      # (client-owned) or subdomain=true (platform subdomain — always the
-      # client_slug itself, e.g. newco-corp -> newco-corp.nomowsoft.com,
-      # never a separate value); contact_email, addon_repos (comma-separated
-      # catalog keys), selected_addons (comma-separated subset), region,
-      # gcp_project (falls back to vars.GCP_PROJECT).
+      # client_payload fields: client_slug, domain (both required);
+      # contact_email, addon_repos (comma-separated catalog keys),
+      # selected_addons (comma-separated subset), region, gcp_project (falls
+      # back to vars.GCP_PROJECT). DNS (A record + Certificate Manager
+      # CNAME) is always a manual step at the client's own DNS provider —
+      # this repo doesn't manage DNS itself.
       - name: Onboard client (validate, provision, install, fetch creds)
         if: github.event_name == 'repository_dispatch'
         id: onboard
         env:
           GITHUB_TOKEN: ${{ secrets.ADDONS_GITHUB_TOKEN }}
-          PLATFORM_DNS_ZONE: ${{ vars.PLATFORM_DNS_ZONE }}
           # Every repository_dispatch payload field is routed through env:
           # and referenced below as a shell variable ("$VAR"), never as a
           # raw ${{ }} expression inside the script body. ${{ }} substitutes
@@ -106,28 +186,14 @@ jobs:
           # is not.
           PAYLOAD_CLIENT_SLUG: ${{ github.event.client_payload.client_slug }}
           PAYLOAD_DOMAIN: ${{ github.event.client_payload.domain }}
-          PAYLOAD_SUBDOMAIN: ${{ github.event.client_payload.subdomain }}
           PAYLOAD_CONTACT_EMAIL: ${{ github.event.client_payload.contact_email }}
           PAYLOAD_ADDON_REPOS: ${{ github.event.client_payload.addon_repos }}
           PAYLOAD_SELECTED_ADDONS: ${{ github.event.client_payload.selected_addons }}
           PAYLOAD_REGION: ${{ github.event.client_payload.region || 'europe-west1' }}
           PAYLOAD_GCP_PROJECT: ${{ github.event.client_payload.gcp_project || vars.GCP_PROJECT }}
         run: |
-          # Explicit shell branching instead of a single-line `x && a || b`
-          # expression: that pattern silently falls through to the "else"
-          # branch (--use-subdomain) whenever `domain` is missing/mistyped
-          # for ANY reason, even if `subdomain` was never set either —
-          # onboard_client.py's own required-mutually-exclusive-group check
-          # can only catch that if neither flag gets passed at all.
           ARGS=(--client-slug "$PAYLOAD_CLIENT_SLUG")
-          if [ -n "$PAYLOAD_DOMAIN" ]; then
-            ARGS+=(--domain "$PAYLOAD_DOMAIN")
-          elif [ "$PAYLOAD_SUBDOMAIN" = "true" ]; then
-            ARGS+=(--use-subdomain)
-          fi
-          # else: neither set — pass neither flag, so argparse's own
-          # required mutually-exclusive-group check fails loudly instead of
-          # silently defaulting to a platform subdomain.
+          ARGS+=(--domain "$PAYLOAD_DOMAIN")
           ARGS+=(--contact-email "$PAYLOAD_CONTACT_EMAIL")
           ARGS+=(--addon-repos "$PAYLOAD_ADDON_REPOS")
           ARGS+=(--selected-addons "$PAYLOAD_SELECTED_ADDONS")
@@ -148,7 +214,7 @@ jobs:
           subject: "[Odoo SaaS] Client '${{ github.event.client_payload.client_slug }}' — onboarding ${{ job.status }}"
           body: |
             Client: ${{ github.event.client_payload.client_slug }}
-            Domain: ${{ github.event.client_payload.domain || format('{0}.nomowsoft.com', github.event.client_payload.client_slug) }}
+            Domain: ${{ github.event.client_payload.domain }}
             Status: ${{ job.status }}
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 

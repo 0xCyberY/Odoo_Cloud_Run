@@ -124,7 +124,6 @@ Async / control plane:
 │       └── cloud-sql-db/              # Tenant DB + Odoo admin secrets
 └── .github/workflows/
     ├── deploy-fleet.yml               # Build → smoke test → migrate fleet → canary + rollback
-    ├── update-addon.yml               # Single-module update for one tenant
     ├── provision-client.yml           # Onboard a tenant: manual (workflow_dispatch) or automated (repository_dispatch, §12)
     └── destroy-client.yml             # Tear down a tenant workspace: manual or automated (repository_dispatch, §12)
 ```
@@ -284,7 +283,7 @@ db-setup job, which runs `/db-setup.sh` directly — it's pure `psql`, no Odoo.
 What happens when a user opens `https://acme.nomowsoft.com/web`:
 
 1. **DNS** → the tenant's A record points at the shared ALB static IP
-   (managed per tenant by Terraform when `manage_dns = true`).
+   (added manually by the client at their own DNS provider).
 2. **ALB frontend** terminates TLS with the Google-managed certificate, whose
    domain list is generated from `clients.yaml`.
 3. **Cloud Armor** evaluates: WAF rules → per-IP login throttle (60/min on
@@ -527,9 +526,10 @@ scripts/tf.sh shared apply -var enable_certificate_manager=true
 scripts/tf.sh shared output -json certificate_status
 ```
 
-`subdomain_slug` clients (§12) require this to already be applied — their
-onboarding fails at the DNS step otherwise, with a clear error. `domain`
-clients are unaffected either way.
+Onboarding works either way — before this is applied, `onboard_client.py`'s
+DNS step just logs a warning that the CNAME isn't available yet (the A
+record instructions are unaffected); a client's HTTPS activation depends on
+this migration having landed, but provisioning itself never blocks on it.
 
 #### The anchor domain `saas-dev.nomowsoft.com` — why it exists
 
@@ -576,9 +576,10 @@ Notable variables (`terraform/shared/variables.tf`):
 ### `terraform/` — one workspace per tenant
 
 `terraform workspace select <slug>` + `clients/<slug>.tfvars`. Creates the
-tenant **database**, the **GCS bucket** (+ IAM for pooled & cron SAs), the three
-**Cloud Run Jobs** (db-setup / init / migration), and optionally the DNS record.
-It reads `clients.yaml` too (for `db_user`), so tfvars stay minimal.
+tenant **database**, the **GCS bucket** (+ IAM for pooled & cron SAs), and the
+three **Cloud Run Jobs** (db-setup / init / migration). DNS is never
+terraform-managed — it reads `clients.yaml` too (for `db_user`), so tfvars
+stay minimal.
 
 ### Modules
 
@@ -620,15 +621,14 @@ image as the services, but batch containers that run once and exit:
 | `<slug>-odoo-job-init` | First provisioning only | `odoo -d <db> -i base,web,gcs_attachment_default,addon_entitlement --without-demo=all --stop-after-init` — builds the initial schema, installs the web client, binds the GCS attachment storage record, and installs the entitlement gate |
 | `<slug>-odoo-job-migration` | Every upgrade | Default args `odoo -d <db> -u all --stop-after-init` — reload every installed module and apply schema/view/data changes to this tenant's database |
 
-The migration job has two callers, matching the two upgrade scenarios:
-
-- **Targeted addon update** — `update-addon.yml` executes it with
-  **overridden args** (`-u <single module>` instead of `-u all`): one client,
-  one module, after its addon repo changed.
-- **Fleet upgrade** — the `odoo-fleet-migration` Cloud Workflow executes each
-  tenant's job **sequentially with the default `-u all`**, for platform-wide
-  changes (base image bump, common-repo change) where every module in every
-  database needs re-migration.
+The migration job's caller: the `odoo-fleet-migration` Cloud Workflow executes
+each tenant's job **sequentially with the default `-u all`**, for
+platform-wide changes (base image bump, common-repo change, or a single
+module's code changing) where every affected database needs re-migration.
+There is deliberately no separate single-client/single-module fast path —
+the image is shared, so any code change reaches every tenant's workers
+regardless of who you meant to target; `deploy-fleet` is the only workflow
+that rebuilds/rolls the image out, and it always migrates every tenant first.
 
 Migrations run as a separate job rather than on the live service on purpose:
 `--stop-after-init` means one dedicated process performs the schema change and
@@ -647,8 +647,7 @@ install — and the reason the gate exists is *schema drift*, not just billing:
 1. The shared image is rebuilt and rolled out → the tenant's workers now run
    the **new** code (code reaches everyone, see the table above).
 2. `-u` runs only against the databases of clients who **declare** the addon
-   (that's who `update-addon.yml` / fleet migration know about — and
-   update-addon's entitlement guard refuses undeclared modules outright).
+   (that's who fleet migration knows about).
 3. An undeclared tenant would be running new code against an **unmigrated
    database** — crashed views, missing columns, tracebacks — until someone
    manually executes its migration job with `-u <module>`.
@@ -672,12 +671,6 @@ slips through anyway.
 | 7. Canary | Traffic 10% → 50% → 100%, health-gated on `/web/health` through the ALB; any 5xx → instant rollback to the previous revision | Bad revision never reaches all users |
 | 8. Finalize | Traffic reset to `--to-latest`; websocket + cron-runner rolled | Future Terraform revisions (e.g. new tenant in the pgbouncer map) serve immediately |
 
-### `update-addon.yml` — one module, one tenant
-
-Rebuilds the image (SHA tag), runs `-u <module>` in the target tenant's DB via
-its migration job, then rolls the image to all three services. Since the image
-is shared, prefer **deploy-fleet** when a change affects multiple clients.
-
 ### `provision-client.yml` / `destroy-client.yml`
 
 Each has **two independent triggers sharing one job**, branched on
@@ -685,7 +678,7 @@ Each has **two independent triggers sharing one job**, branched on
 
 | Trigger | Runs | For |
 |---|---|---|
-| `workflow_dispatch` (manual, Actions UI) | `scripts/provision.py` / `scripts/destroy.py` against an **existing** `clients.yaml` entry | The CI equivalent of running those scripts locally — shared apply → tenant apply → db-setup → init (or terraform destroy + workspace cleanup) |
+| `workflow_dispatch` (manual, Actions UI) | For `provision-client.yml`: `scripts/provision.py` against an **existing** `clients.yaml` entry, or `scripts/onboard_client.py` for a new one (branches on whether `client_slug` already exists). For `destroy-client.yml`: `scripts/destroy.py` against an existing entry | The CI equivalent of running those scripts locally, without needing a PAT to fire `repository_dispatch` |
 | `repository_dispatch` (`types: client-onboarding` / `client-offboarding`) | `scripts/onboard_client.py`, which **adds** the `clients.yaml` entry itself from the payload, then runs the full flow | The automated path (§12's "Automated onboarding" subsection has setup + usage) |
 
 Required GitHub secrets: `GCP_WORKLOAD_IDENTITY_PROVIDER`,
@@ -694,8 +687,7 @@ addon repos — also used by `onboard_client.py` to resolve `selected_addons`
 catalog keys to real module names), `SENDGRID_API_KEY` (email, §9's Email
 delivery notes / §12's automated-onboarding setup). Required GitHub repo
 **variables** (Settings → Actions → Variables, not secrets): `GCP_PROJECT`,
-`NOTIFY_EMAIL_FROM`, `NOTIFY_EMAIL_TO`, and — only if you'll onboard
-`subdomain_slug` clients — `PLATFORM_DNS_ZONE` (§12). Neither the terraform
+`NOTIFY_EMAIL_FROM`, `NOTIFY_EMAIL_TO`. Neither the terraform
 backends nor these workflows hardcode a project or state bucket —
 `GCP_PROJECT` and `<GCP_PROJECT>-tf-state` are the single source of truth for
 CI, matching `scripts/tf.sh` locally.
@@ -995,7 +987,6 @@ domain        = "zed.nomowsoft.com"
 database_name = "zed"
 admin_user    = "admin@zed-corp.com"        # the tenant's Odoo admin login
 image_url     = "europe-west1-docker.pkg.dev/project-b85b49c5-5bdc-48ac-989/odoo-v18-repo/odoo-pooled:latest"
-# manage_dns  = true                        # only if the zone lives in Cloud DNS
 ```
 
 Commit both files — CI reads them from the repo, and clients.yaml history *is*
@@ -1054,9 +1045,9 @@ One command, four phases (§11 Phase 7 describes each): **shared apply**
 (SQL user + password secret, pgbouncer map, cert domain, `ODOO_DATABASES`,
 uptime check — rolls new revisions of all three services; existing tenants are
 unaffected, CI owns traffic) → **tenant workspace apply** (database, GCS
-bucket, the three Cloud Run Jobs, DNS record if `manage_dns`) → **db-setup
-job** → **init job** + admin-credential swap. A single 30s-retry warning on
-the tenant apply is normal (Secret Manager IAM propagation).
+bucket, the three Cloud Run Jobs) → **db-setup job** → **init job** +
+admin-credential swap. A single 30s-retry warning on the tenant apply is
+normal (Secret Manager IAM propagation).
 
 Then restore the cron runner:
 
@@ -1147,28 +1138,18 @@ Terraform/DNS step for platform-issued subdomains. It's wired into
    uses the same secret): `onboard_client.py` reuses it to clone a client's
    `selected_addons` repos and resolve them to real module technical names
    for the init job's `-i` list.
-4. **Cloud DNS managed zone for `nomowsoft.com`** — required ONLY for
-   `subdomain_slug` clients (self-managed platform subdomains); `domain`
-   clients are unaffected and keep today's manual-CNAME flow. This repo does
-   not create the zone itself (DNS today is registrar-managed, §11 Phase 6);
-   you must: create a Cloud DNS managed zone for `nomowsoft.com` in the
-   shared GCP project, then delegate `nomowsoft.com`'s NS records to it at
-   the registrar (one-time, same trust shift as moving DNS providers).
-   Repo variable `PLATFORM_DNS_ZONE` = that zone's name. Until this is done,
-   onboarding a `subdomain_slug` client fails at the DNS step with a clear
-   error — `domain` clients are never blocked by it.
-5. **Certificate Manager migration** (§9's per-domain cert design,
+4. **Certificate Manager migration** (§9's per-domain cert design,
    `terraform/shared`'s `enable_certificate_manager` variable, default
-   `false`): a `subdomain_slug` client's DNS step additionally needs this
-   applied first (it reads the `dns_authorization_records` output, which is
+   `false`): not required to onboard, but a client's DNS step surfaces an
+   empty/missing CNAME (just a warning, not a hard failure) until this has
+   been applied (it reads the `dns_authorization_records` output, which is
    empty until the flag is on). This is a **separate, deliberate apply**
    (`terraform -chdir=terraform/shared apply -var enable_certificate_manager=true`)
    — never bundle it into a routine provisioning apply; it cuts every
    existing tenant (acme/beta/mac) over from the shared-SAN cert to
    per-domain certs in one step. Apply it once, confirm all existing tenants
-   reach `ACTIVE` independently (`certificate_status` output), before
-   onboarding the first `subdomain_slug` client.
-6. **Low-privilege user creation stays manual** (deliberately — no privilege/
+   reach `ACTIVE` independently (`certificate_status` output).
+5. **Low-privilege user creation stays manual** (deliberately — no privilege/
    role model exists yet to script it safely): after onboarding completes and
    admin credentials land in the DevOps/Product inbox, a human creates a
    separate low-privilege user in the new tenant and shares only that with
@@ -1181,15 +1162,13 @@ Terraform/DNS step for platform-issued subdomains. It's wired into
 gh api repos/:owner/:repo/dispatches \
   -f event_type=client-onboarding \
   -f client_payload[client_slug]=newco-corp \
-  -f client_payload[subdomain]=true \
+  -f client_payload[domain]=newco.nomowsoft.com \
   -f client_payload[contact_email]=ops@newco.example \
   -f client_payload[addon_repos]=Human-Resources,Accounting \
   -f client_payload[selected_addons]=Human-Resources
-# -> newco-corp.nomowsoft.com — a platform subdomain is ALWAYS the client
-# slug itself (never a separate value): there's no independent slug to pass.
-#
-# domain clients: use client_payload[domain]=newco.example instead of
-# subdomain=true — exactly one of the two is required.
+# DNS (A record + Certificate Manager CNAME) is always a manual step at the
+# client's own DNS provider — this repo never manages a client's DNS itself,
+# whether the domain is newco-corp's own or a nomowsoft.com subdomain.
 ```
 
 **Local/manual invocation** — same script, useful to dry-run a payload before
@@ -1198,13 +1177,11 @@ through CI at all:
 
 ```bash
 GITHUB_TOKEN=<pat> .venv/bin/python scripts/onboard_client.py \
-  --client-slug newco-corp --use-subdomain \
+  --client-slug newco-corp --domain newco.nomowsoft.com \
   --contact-email ops@newco.example \
   --addon-repos Human-Resources,Accounting \
   --selected-addons Human-Resources \
   --gcp-project $PROJECT --dry-run   # drop --dry-run to actually run it
-
-# domain clients: --domain newco.example instead of --use-subdomain
 ```
 
 `--dry-run` validates the payload and prints the `clients.yaml` entry it
@@ -1284,8 +1261,9 @@ scripts/tf.sh root state rm module.cloud_sql_db.google_sql_database.client
 
 ### Step 5 — Destroy the tenant workspace
 
-Removes the GCS bucket (**and its contents**), the three Cloud Run Jobs, the
-admin secrets, and the Cloud DNS record if managed:
+Removes the GCS bucket (**and its contents**), the three Cloud Run Jobs, and
+the admin secrets. The client's own DNS records are unaffected — this repo
+never managed them, so nothing to clean up there:
 
 ```bash
 scripts/tf.sh root destroy -var-file=../clients/zed-corp.tfvars

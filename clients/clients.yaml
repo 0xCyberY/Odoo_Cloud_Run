@@ -23,13 +23,11 @@ catalog:
     branch: '18.0'
 
 # Per-client schema:
-#   domain          OR subdomain_slug (mutually exclusive, exactly one required)
-#                     - domain: client's own domain; they add a CNAME (manual step)
-#                     - subdomain_slug: platform-issued '{slug}.nomowsoft.com',
-#                       self-managed DNS, no client step, no wait — MUST equal
-#                       this client's own key above (e.g. newco-corp:'s
-#                       subdomain_slug can only be 'newco-corp', never a
-#                       separate value; enforced by validate_clients.py R8)
+#   domain            REQUIRED — the client's domain, e.g. acme.com or a
+#                     nomowsoft.com subdomain like acme.nomowsoft.com. DNS
+#                     (A record + Certificate Manager CNAME) is always a
+#                     manual step at the domain's own DNS provider — this
+#                     repo never manages a client's DNS itself
 #   region, database, db_user, gcp_project   (as today)
 #   addon_repos       catalog keys this client is entitled to (billing)
 #   selected_addons   OPTIONAL subset of addon_repos to auto-install on

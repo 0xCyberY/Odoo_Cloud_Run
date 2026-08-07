@@ -20,28 +20,15 @@ Rules (dbfilter = ^(%d|%h)$ — Option A hybrid):
   R7  every client addon_repos entry is a string referencing an existing
       catalog key (the old inline {repo,branch,path} form is rejected —
       entitlements are rendered from these references)
-  R8  domain / subdomain_slug are mutually exclusive and exactly one is set;
-      'domain' must be a syntactically valid hostname (DOMAIN_RE) — this is
-      a security boundary, not just hygiene: onboard_client.py derives
-      'database' from 'domain' and feeds both into generated YAML/tfvars
-      text and a comma-joined `gcloud run jobs execute --args=` string, so
-      characters outside a hostname charset must never reach either;
-      subdomain_slug is a valid DNS label (SUBDOMAIN_SLUG_RE), not a
-      reserved word, MUST EQUAL the client's own slug (never a separate
-      value — newco-corp's subdomain is always newco-corp.nomowsoft.com),
-      and is unique jointly with 'domain' (a subdomain_slug resolves to
-      '{slug}.nomowsoft.com', which must not collide with another client's
-      literal domain either)
+  R8  'domain' is required and must be a syntactically valid hostname
+      (DOMAIN_RE) — this is a security boundary, not just hygiene:
+      onboard_client.py derives 'database' from 'domain' and feeds both
+      into generated YAML/tfvars text and a comma-joined
+      `gcloud run jobs execute --args=` string, so characters outside a
+      hostname charset must never reach either
   R9  contact_email, when present, looks like an email address
   R10 selected_addons is a subset of the client's own addon_repos —
       auto-install can't select something the client isn't entitled to
-
-Live DNS availability for a subdomain_slug (does '{slug}.nomowsoft.com'
-already resolve, e.g. a stale/orphaned record?) is NOT checked here — it
-needs network access that the other callers (prepare_addons.py, provision.py,
-destroy.py) don't have and shouldn't require. See check_subdomain_dns(),
-called separately by onboard_client.py before provisioning a new subdomain
-client.
 
 Usage: python3 scripts/validate_clients.py [path/to/clients.yaml]
 Exit code 1 with a per-violation message on failure.
@@ -49,7 +36,6 @@ Exit code 1 with a per-violation message on failure.
 
 import os
 import re
-import socket
 import sys
 
 import yaml
@@ -59,25 +45,15 @@ DEFAULT_PATH = os.path.join(
     "clients", "clients.yaml",
 )
 
-PLATFORM_APEX_DOMAIN = "nomowsoft.com"
-
-# DNS labels the platform itself uses, or that would be confusing/abusable
-# as a tenant subdomain (www/api/admin-style squatting).
-RESERVED_SUBDOMAINS = frozenset({
-    "www", "api", "admin", "app", "mail", "static", "assets", "cdn",
-    "saas-dev",  # platform anchor domain — README §9
-})
-
 # Standard DNS label: 1-63 chars, alphanumeric, hyphens not at either end.
 _DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-SUBDOMAIN_SLUG_RE = re.compile(f"^{_DNS_LABEL}$")
 
 # Full hostname (the client-owned 'domain' field): 2+ dot-separated DNS
-# labels. Deliberately strict, matching SUBDOMAIN_SLUG_RE's rigor — 'domain'
-# feeds into onboard_client.py's generated clients.yaml/tfvars text AND (via
-# _first_label -> database) a comma-joined `gcloud run jobs execute --args=`
-# string, so anything outside this charset (commas, quotes, newlines, other
-# shell/YAML/argv metacharacters) must never be accepted here.
+# labels. Deliberately strict — 'domain' feeds into onboard_client.py's
+# generated clients.yaml/tfvars text AND (via _first_label -> database) a
+# comma-joined `gcloud run jobs execute --args=` string, so anything outside
+# this charset (commas, quotes, newlines, other shell/YAML/argv
+# metacharacters) must never be accepted here.
 DOMAIN_RE = re.compile(rf"^{_DNS_LABEL}(?:\.{_DNS_LABEL})+$")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -92,13 +68,8 @@ def _first_label(domain):
 
 
 def _effective_domain(c):
-    """The hostname this client actually serves on: literal 'domain', or the
-    platform subdomain derived from 'subdomain_slug'."""
-    if c.get("domain"):
-        return c["domain"]
-    if c.get("subdomain_slug"):
-        return f"{c['subdomain_slug']}.{PLATFORM_APEX_DOMAIN}"
-    return None
+    """The hostname this client actually serves on."""
+    return c.get("domain")
 
 
 def _find_duplicates(items):
@@ -129,9 +100,7 @@ def validate(config, raw_text=None):
     databases = [c["database"] for c in clients.values() if c.get("database")]
     db_users = [c["db_user"] for c in clients.values() if c.get("db_user")]
 
-    # R2/R3/R4 — cross-client uniqueness (domains includes subdomain_slug
-    # clients' derived '{slug}.nomowsoft.com' hostname, so a subdomain can't
-    # collide with another client's literal domain either)
+    # R2/R3/R4 — cross-client uniqueness
     for domain in _find_duplicates(domains):
         errors.append(f"R2 duplicate domain '{domain}' used by more than one client")
     for db in _find_duplicates(databases):
@@ -196,43 +165,17 @@ def validate(config, raw_text=None):
                     f"(known: {sorted(catalog) or '(none)'})"
                 )
 
-    # R8 — domain / subdomain_slug: mutually exclusive, exactly one set;
-    # subdomain_slug is a valid, non-reserved DNS label.
+    # R8 — domain is required and must be a valid hostname.
     for slug, c in clients.items():
-        domain, sub = c.get("domain"), c.get("subdomain_slug")
-        if domain and sub:
-            errors.append(
-                f"R8 [{slug}] 'domain' and 'subdomain_slug' are mutually exclusive "
-                f"— got both ('{domain}', '{sub}')"
-            )
-        elif not domain and not sub:
-            errors.append(f"R8 [{slug}] must set either 'domain' or 'subdomain_slug'")
-        if domain and (not isinstance(domain, str) or not DOMAIN_RE.match(domain)):
+        domain = c.get("domain")
+        if not domain:
+            errors.append(f"R8 [{slug}] must set 'domain'")
+        elif not isinstance(domain, str) or not DOMAIN_RE.match(domain):
             errors.append(
                 f"R8 [{slug}] domain '{domain}' is not a valid hostname "
                 "(lowercase DNS labels separated by dots, hyphens not at either "
                 "end of a label)"
             )
-        if sub:
-            if not isinstance(sub, str) or not SUBDOMAIN_SLUG_RE.match(sub):
-                errors.append(
-                    f"R8 [{slug}] subdomain_slug '{sub}' is not a valid DNS label "
-                    "(lowercase alphanumeric, hyphens not at either end, 1-63 chars)"
-                )
-            elif sub in RESERVED_SUBDOMAINS:
-                errors.append(
-                    f"R8 [{slug}] subdomain_slug '{sub}' is reserved for platform use "
-                    f"(reserved: {sorted(RESERVED_SUBDOMAINS)})"
-                )
-            elif sub != slug:
-                # A platform subdomain is always the client's own slug
-                # (newco-corp -> newco-corp.nomowsoft.com) — never a separate,
-                # independently chosen value. Nothing to collide or typo
-                # between the two, and onboard_client.py never accepts one.
-                errors.append(
-                    f"R8 [{slug}] subdomain_slug '{sub}' must equal the client's own "
-                    f"slug '{slug}' — a platform subdomain is always the client slug itself"
-                )
 
     # R9 — contact_email, when present, looks like an email address
     for slug, c in clients.items():
@@ -251,20 +194,6 @@ def validate(config, raw_text=None):
                 )
 
     return errors
-
-
-def check_subdomain_dns(subdomain_slug, base_domain=PLATFORM_APEX_DOMAIN):
-    """Live DNS check for onboard_client.py: does '{slug}.{base_domain}' already
-    resolve? Returns True if it's free (NXDOMAIN/no resolution), False if some
-    record already answers for it (e.g. a stale/orphaned entry). Requires
-    network access — not called from validate() so the offline callers
-    (prepare_addons.py, provision.py, destroy.py) are unaffected."""
-    hostname = f"{subdomain_slug}.{base_domain}"
-    try:
-        socket.getaddrinfo(hostname, None)
-        return False
-    except socket.gaierror:
-        return True
 
 
 def validate_file(path=DEFAULT_PATH):

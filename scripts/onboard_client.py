@@ -5,19 +5,18 @@ scripts/onboard_client.py
 Single consolidated script for the automated client-onboarding flow, fired by
 `repository_dispatch` (types: client-onboarding) against provision-client.yml.
 Takes a signup payload from "request" to "admin creds ready for handover,
-selected addons installed, DNS self-managed for platform subdomains" with no
-manual infrastructure step:
+selected addons installed" with no manual Terraform step (DNS is still a
+manual step for the client — see step 4):
 
-  1. validate the payload (reuses validate_clients.py — R1-R10, plus a live
-     DNS collision check for subdomain_slug clients)
+  1. validate the payload (reuses validate_clients.py — R1-R10)
   2. append the clients.yaml entry (raw-text append — preserves the file's
      hand-written schema comments, unlike a yaml.safe_load/dump round-trip)
   3. apply terraform/shared (tenant SQL user, pgbouncer map, cert domain —
      imports CloudRunProvisioner from provision.py as a class, reused in this
      one process rather than shelling out to a second script)
-  4. self-manage DNS for subdomain_slug clients (A record + Certificate
-     Manager dns_authorization CNAME via `gcloud dns`); surface both records
-     for domain clients to add manually instead (unchanged from today's flow)
+  4. surface the A record + Certificate Manager dns_authorization CNAME for
+     the client to add manually at their own DNS provider — this repo never
+     manages a client's DNS itself
   5. apply the tenant Terraform workspace, run db-setup, then run the init
      job with a combined -i list: the fixed platform base
      (terraform/main.tf's cloud_run_init_job args) + DEFAULT_AUTO_INSTALL
@@ -28,12 +27,6 @@ manual infrastructure step:
      script does NOT send email itself; a subsequent step in
      provision-client.yml (dawidd6/action-send-mail@v3) does, reading these
      outputs, to the DevOps/Product distribution list — never the client.
-
-Requires the Certificate Manager migration (Phase 1.5,
-terraform/shared: var.enable_certificate_manager) to be applied before a
-subdomain_slug client's DNS step can complete — until then, step 4 fails
-with a clear error for subdomain_slug clients specifically; domain clients
-are unaffected (they never depended on it).
 """
 
 import argparse
@@ -92,16 +85,11 @@ def _extract_frozenset_constant(py_path, name):
 
 
 class ClientOnboarder:
-    def __init__(self, *, client_slug, domain=None, use_subdomain=False, contact_email=None,
+    def __init__(self, *, client_slug, domain, contact_email=None,
                  addon_repos=None, selected_addons=None, region="europe-west1",
                  gcp_project=None, db_user=None, dry_run=False):
         self.client_slug = client_slug
-        self.domain = domain or None
-        # subdomain_slug is never a separately supplied value — a
-        # platform-subdomain client's subdomain IS its client_slug
-        # (newco-corp -> newco-corp.nomowsoft.com), so there's nothing to
-        # collide or typo between the two.
-        self.subdomain_slug = client_slug if use_subdomain else None
+        self.domain = domain
         self.contact_email = contact_email or None
         self.addon_repos = list(addon_repos or [])
         self.selected_addons = list(selected_addons or [])
@@ -113,10 +101,10 @@ class ClientOnboarder:
 
         if not self.gcp_project:
             raise ValueError("--gcp-project or GCP_PROJECT env var is required")
-        if bool(self.domain) == bool(self.subdomain_slug):
-            raise ValueError("Exactly one of --domain or --use-subdomain is required")
+        if not self.domain:
+            raise ValueError("--domain is required")
 
-        self.database = self.subdomain_slug or self._first_label(self.domain)
+        self.database = self._first_label(self.domain)
         self.db_user = db_user or f"{self.client_slug.replace('-', '_')}_production"
 
     @staticmethod
@@ -132,11 +120,8 @@ class ClientOnboarder:
             "db_user": self.db_user,
             "gcp_project": self.gcp_project,
             "addon_repos": list(self.addon_repos),
+            "domain": self.domain,
         }
-        if self.domain:
-            entry["domain"] = self.domain
-        else:
-            entry["subdomain_slug"] = self.subdomain_slug
         if self.selected_addons:
             entry["selected_addons"] = list(self.selected_addons)
         if self.contact_email:
@@ -166,14 +151,6 @@ class ClientOnboarder:
         if errors:
             raise ValueError("Onboarding payload rejected:\n  " + "\n  ".join(errors))
 
-        if self.subdomain_slug and not self.dry_run:
-            if not validate_clients.check_subdomain_dns(self.subdomain_slug):
-                raise ValueError(
-                    f"'{self.subdomain_slug}.{validate_clients.PLATFORM_APEX_DOMAIN}' already "
-                    "resolves in DNS (stale/orphaned record?) — refusing to provision a "
-                    "colliding subdomain before touching Terraform or DNS"
-                )
-
         log_success("Payload valid — no collisions, no policy violations.")
         self._config = config
         return config, raw
@@ -181,10 +158,7 @@ class ClientOnboarder:
     # ── Step 2: clients.yaml ─────────────────────────────────────────────────
     def _render_entry_block(self):
         lines = [f"  {self.client_slug}:"]
-        if self.domain:
-            lines.append(f"    domain:      {self.domain}")
-        else:
-            lines.append(f"    subdomain_slug: {self.subdomain_slug}")
+        lines.append(f"    domain:      {self.domain}")
         lines.append(f"    region:      {self.region}")
         lines.append(f"    database:    {self.database}")
         lines.append(f"    db_user:     {self.db_user}")
@@ -237,24 +211,15 @@ class ClientOnboarder:
         clients/*.tfvars files."""
         log_info(f"--- Step 3: Writing clients/{self.client_slug}.tfvars ---")
         image_url = f"{self.region}-docker.pkg.dev/{self.gcp_project}/odoo-v18-repo/odoo-pooled:latest"
-        effective_domain = self.domain or f"{self.subdomain_slug}.{validate_clients.PLATFORM_APEX_DOMAIN}"
         lines = [
             f'gcp_project   = "{self.gcp_project}"',
             f'region        = "{self.region}"',
             f'client_slug   = "{self.client_slug}"',
-            f'domain        = "{effective_domain}"',
+            f'domain        = "{self.domain}"',
             f'database_name = "{self.database}"',
             f'admin_user    = "admin@{self.client_slug}.com"',
             f'image_url     = "{image_url}"',
         ]
-        if self.subdomain_slug:
-            # terraform/main.tf's own google_dns_record_set.client_dns
-            # (var.manage_dns) creates the A record — the ONLY DNS record
-            # this script creates imperatively itself is the Certificate
-            # Manager dns_authorization CNAME (handle_dns), which has no
-            # terraform-managed equivalent yet.
-            lines.append("manage_dns    = true")
-            lines.append(f'dns_managed_zone = "{self._dns_zone()}"')
         content = "\n".join(lines) + "\n"
 
         if self.dry_run:
@@ -293,65 +258,21 @@ class ClientOnboarder:
         res = run_cmd(["terraform", "output", "-json", "dns_authorization_records"], cwd=shared_dir)
         return json.loads(res.stdout)
 
-    def _dns_zone(self):
-        zone = os.environ.get("PLATFORM_DNS_ZONE")
-        if not zone:
-            raise ValueError(
-                "PLATFORM_DNS_ZONE env var is required to self-manage DNS for a "
-                "subdomain_slug client — the Cloud DNS managed zone name for "
-                "nomowsoft.com in this GCP project. See README's onboarding "
-                "prerequisites (this zone + its registrar NS delegation is a "
-                "one-time manual setup step, not something this script creates)."
-            )
-        return zone
-
     def handle_dns(self):
         log_info("--- Step 4: DNS ---")
         dns_auth_records = self._read_dns_authorization_records()
         auth = dns_auth_records.get(self.client_slug)
 
-        if not self.subdomain_slug:
-            alb_ip = self._alb_ip()
-            log_info(f"'{self.domain}' is a client-owned domain — add these records "
-                      "manually at the client's DNS registrar (unchanged from today's flow):")
-            log_info(f"  A record:  {self.domain} -> {alb_ip}")
-            if auth:
-                log_info(f"  CNAME:     {auth['name']} -> {auth['data']} (cert activation proof)")
-            else:
-                log_warn("No dns_authorization output for this client yet — Certificate Manager "
-                         "migration (Phase 1.5) may not be applied. The A record above still "
-                         "routes traffic; HTTPS activation depends on that migration landing.")
-            return
-
-        if not auth:
-            raise ValueError(
-                f"No dns_authorization output for '{self.client_slug}' — the Certificate "
-                "Manager migration (terraform/shared var.enable_certificate_manager) must be "
-                "applied before a subdomain_slug client can be onboarded. Domain clients don't "
-                "have this dependency; only self-managed platform subdomains do."
-            )
-
-        zone = self._dns_zone()
-        fqdn = f"{self.subdomain_slug}.{validate_clients.PLATFORM_APEX_DOMAIN}"
-        # The A record is NOT created here — write_tfvars() sets manage_dns=true
-        # + dns_managed_zone, so terraform/main.tf's own google_dns_record_set
-        # creates it as part of execute_terraform() below (state-tracked,
-        # instead of an untracked imperative gcloud call that would also
-        # collide with that resource on every re-apply). Only the Certificate
-        # Manager dns_authorization CNAME has no terraform-managed equivalent,
-        # so it's the one record this script creates itself.
-
-        if self.dry_run:
-            log_info(f"[DRY-RUN] Would create CNAME {auth['name']} -> {auth['data']} "
-                      f"(A record for {fqdn} is terraform-managed, see write_tfvars)")
-            return
-
-        run_cmd([
-            "gcloud", "dns", "record-sets", "create", auth["name"],
-            f"--type={auth['type']}", "--ttl=300", f"--zone={zone}", f"--project={self.gcp_project}",
-            f"--rrdatas={auth['data']}",
-        ], capture_output=False)
-        log_success(f"Cert CNAME self-managed for '{fqdn}' — no manual client step.")
+        alb_ip = self._alb_ip()
+        log_info(f"'{self.domain}' — add these records manually at the domain's "
+                  "DNS provider (this repo never manages a client's DNS itself):")
+        log_info(f"  A record:  {self.domain} -> {alb_ip}")
+        if auth:
+            log_info(f"  CNAME:     {auth['name']} -> {auth['data']} (cert activation proof)")
+        else:
+            log_warn("No dns_authorization output for this client yet — Certificate Manager "
+                     "migration (Phase 1.5) may not be applied. The A record above still "
+                     "routes traffic; HTTPS activation depends on that migration landing.")
 
     # ── Step 5: init job with combined -i list ──────────────────────────────
     def _resolve_selected_modules(self, tmp_dir):
@@ -473,13 +394,9 @@ class ClientOnboarder:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Onboard a new Odoo SaaS client end-to-end.")
     parser.add_argument("--client-slug", required=True)
-    domain_group = parser.add_mutually_exclusive_group(required=True)
-    domain_group.add_argument("--domain", help="Client-owned domain (manual CNAME step)")
-    domain_group.add_argument(
-        "--use-subdomain", action="store_true",
-        help="Platform-issued '{client-slug}.nomowsoft.com' (self-managed DNS) — the "
-             "subdomain is always the client slug itself, never a separate value",
-    )
+    parser.add_argument("--domain", required=True,
+                         help="Client's domain, e.g. acme.nomowsoft.com or acme.com "
+                              "(manual A/CNAME step at the domain's own DNS provider)")
     parser.add_argument("--contact-email", default=None)
     parser.add_argument("--addon-repos", default="", help="Comma-separated catalog keys this client is entitled to")
     parser.add_argument("--selected-addons", default="", help="Comma-separated subset of --addon-repos to auto-install")
@@ -494,7 +411,6 @@ if __name__ == "__main__":
         onboarder = ClientOnboarder(
             client_slug=args.client_slug,
             domain=args.domain,
-            use_subdomain=args.use_subdomain,
             contact_email=args.contact_email,
             addon_repos=[a.strip() for a in args.addon_repos.split(",") if a.strip()],
             selected_addons=[a.strip() for a in args.selected_addons.split(",") if a.strip()],

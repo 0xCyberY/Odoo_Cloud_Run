@@ -21,11 +21,6 @@ data "google_sql_database_instance" "shared_db" {
   project = var.gcp_project
 }
 
-data "google_compute_global_address" "alb_ip" {
-  name    = "odoo-shared-alb-ip"
-  project = var.gcp_project
-}
-
 locals {
   # Single source of truth for tenant settings shared with terraform/shared
   clients_config = yamldecode(file("${path.module}/../clients/clients.yaml"))
@@ -224,13 +219,6 @@ module "cloud_run_migration_job" {
 # run exclusively on the shared Cron Runner service (max_instances = 1,
 # terraform/shared) — v2 Fix #8: no duplicate cron runs, no locking hacks.
 
-# ── DNS Configuration ────────────────────────────────────────────────────────
-resource "google_dns_record_set" "client_dns" {
-  count        = var.manage_dns ? 1 : 0
-  name         = "${var.domain}."
-  type         = "A"
-  ttl          = 300
-  managed_zone = var.dns_managed_zone
-  project      = var.gcp_project
-  rrdatas      = [data.google_compute_global_address.alb_ip.address]
-}
+# NOTE: no DNS resource here — every client manages their own domain's DNS
+# (A record + Certificate Manager CNAME) at their own provider. This repo
+# never becomes authoritative for a client's DNS.

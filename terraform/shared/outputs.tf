@@ -53,7 +53,7 @@ output "dns_authorization_records" {
       data   = auth.dns_resource_record[0].data
     }
   }
-  description = "Per-domain DNS authorization CNAME each domain owner must add before its cert activates. Keyed by client slug ('_platform_anchor' for saas-dev.nomowsoft.com). Empty until certificate_manager_enabled = true. onboard_client.py reads this to self-create the record for subdomain_slug clients; domain clients get it surfaced manually."
+  description = "Per-domain DNS authorization CNAME each domain owner must add before its cert activates. Keyed by client slug ('_platform_anchor' for saas-dev.nomowsoft.com). Empty until certificate_manager_enabled = true. onboard_client.py reads this and surfaces it to the client to add manually at their own DNS provider."
 }
 
 output "certificate_status" {

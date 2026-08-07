@@ -35,16 +35,3 @@ variable "image_url" {
   type        = string
   description = "The container image URL in Artifact Registry (pooled or dedicated)"
 }
-
-
-variable "manage_dns" {
-  type        = bool
-  description = "Whether to manage the DNS A-record automatically via GCP Cloud DNS"
-  default     = false
-}
-
-variable "dns_managed_zone" {
-  type        = string
-  description = "The name of the GCP Cloud DNS managed zone"
-  default     = ""
-}
