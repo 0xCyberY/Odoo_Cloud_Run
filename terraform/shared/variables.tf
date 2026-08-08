@@ -65,12 +65,6 @@ variable "per_tenant_rate_limit_per_minute" {
   default     = 600
 }
 
-variable "alert_email" {
-  type        = string
-  description = "Email address for Cloud Monitoring alert notifications (empty disables the channel)"
-  default     = ""
-}
-
 variable "github_repo" {
   type        = string
   description = "GitHub \"owner/repo\" allowed to authenticate as the CI/CD deployer via Workload Identity Federation — scoped to exactly this repo, no other GitHub repo can assume the role."
@@ -79,6 +73,6 @@ variable "github_repo" {
 
 variable "enable_certificate_manager" {
   type        = bool
-  default     = false
-  description = "Cuts over from the single shared-SAN google_compute_managed_ssl_certificate to per-domain Certificate Manager. Defaults false so the migration stays inert code until a deliberate, confirmed apply — flipping it affects live HTTPS for every existing tenant (acme/beta/mac) and must never happen as a side effect of a routine tenant onboarding/provisioning apply (which also runs `terraform apply` on this same shared workspace). Flip to true only in an apply whose entire purpose is this migration."
+  default     = true
+  description = "Cuts over from the single shared-SAN google_compute_managed_ssl_certificate to per-domain Certificate Manager. The migration has been applied and is now the live setup (acme/beta/mac all on per-domain certs), so this defaults true so a routine plan/apply matches production. Flip to false only in an apply whose entire purpose is reverting to the legacy shared-SAN certificate — that, too, affects live HTTPS for every existing tenant and must never happen as a side effect of a routine tenant onboarding/provisioning apply (which also runs `terraform apply` on this same shared workspace)."
 }

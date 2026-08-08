@@ -1,4 +1,4 @@
-name: Deploy fleet (build → migrate → canary)
+name: Update fleet (build → migrate → canary)
 # v2 Fix #5 — safe fleet upgrades:
 #   1. Build immutable image (git SHA tag) with the full addon catalog
 #   2. Smoke-test module installation in CI (v2 Fix #6)
@@ -32,7 +32,7 @@ env:
   REPO: odoo-v18-repo
 
 jobs:
-  deploy:
+  update:
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -173,8 +173,8 @@ jobs:
           password: ${{ secrets.SENDGRID_API_KEY }}
           from: ${{ vars.NOTIFY_EMAIL_FROM }}
           to: ${{ vars.NOTIFY_EMAIL_TO }}
-          subject: "[Odoo SaaS] Fleet deploy ${{ job.status }}"
+          subject: "[Odoo SaaS] Fleet update ${{ job.status }}"
           body: |
-            Event: deploy-${{ job.status }}
+            Event: update-${{ job.status }}
             Start from: ${{ inputs.start_from || '(all tenants)' }}
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

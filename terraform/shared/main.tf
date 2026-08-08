@@ -3,7 +3,7 @@
 # Shared project-level infrastructure (v2 hardened architecture).
 # Managed independently of any client. Apply ONCE for the whole platform,
 # and re-apply whenever clients.yaml changes (tenant DB users, pgbouncer map,
-# SSL certificate domains, uptime checks all derive from it).
+# SSL certificate domains all derive from it).
 
 # ── Locals: client catalog (single source of truth: clients/clients.yaml) ────
 locals {
@@ -89,6 +89,8 @@ resource "google_compute_network" "vpc" {
   project                 = var.gcp_project
   auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
+
+  depends_on = [google_project_service.apis]
 }
 
 # 2. Subnet for Cloud Run Egress
@@ -145,7 +147,7 @@ resource "google_sql_database_instance" "shared_db" {
 
   deletion_protection = true
 
-  depends_on = [google_service_networking_connection.private_vpc_connection]
+  depends_on = [google_service_networking_connection.private_vpc_connection, google_project_service.apis]
 
   settings {
     tier              = var.db_tier
@@ -199,7 +201,7 @@ resource "google_redis_instance" "session_cache" {
   display_name  = "Odoo Shared Session Store"
   labels        = local.common_labels
 
-  depends_on = [google_service_networking_connection.private_vpc_connection]
+  depends_on = [google_service_networking_connection.private_vpc_connection, google_project_service.apis]
 }
 
 # 7. Artifact Registry for Odoo Docker Images (odoo-pooled + pgbouncer)
@@ -209,6 +211,8 @@ resource "google_artifact_registry_repository" "odoo_repo" {
   description   = "Docker repository for Odoo v18 custom images"
   format        = "DOCKER"
   project       = var.gcp_project
+
+  depends_on = [google_project_service.apis]
 }
 
 # 8. Cloud Armor Security Policy (WAF / Rate Limiting)
@@ -216,6 +220,8 @@ resource "google_compute_security_policy" "waf_policy" {
   name        = "odoo-cloud-armor-policy"
   project     = var.gcp_project
   description = "Cloud Armor WAF policy for Odoo SaaS"
+
+  depends_on = [google_project_service.apis]
 
   # Default rule: Allow all traffic
   rule {
@@ -281,6 +287,8 @@ resource "google_compute_global_address" "alb_ip" {
   name        = "odoo-shared-alb-ip"
   project     = var.gcp_project
   description = "Shared Static IP for Odoo SaaS Load Balancer"
+
+  depends_on = [google_project_service.apis]
 }
 
 # URL Map: default → pooled service; /websocket → dedicated gevent service
@@ -318,6 +326,13 @@ resource "google_compute_target_https_proxy" "alb_https_proxy" {
 
   ssl_certificates = var.enable_certificate_manager ? null : [google_compute_managed_ssl_certificate.default_cert[0].id]
   certificate_map  = var.enable_certificate_manager ? "//certificatemanager.googleapis.com/projects/${var.gcp_project}/locations/global/certificateMaps/${google_certificate_manager_certificate_map.default[0].name}" : null
+
+  # certificate_map above only references the (possibly still-empty) map
+  # resource, not its entries — Terraform won't otherwise wait for
+  # certificate_map_entry to populate it first. GCP rejects attaching an
+  # empty map with "Certificate Map or at least 1 SSL certificate must be
+  # specified", so force the entries to land before this proxy update runs.
+  depends_on = [google_certificate_manager_certificate_map_entry.tenant]
 }
 
 resource "google_compute_global_forwarding_rule" "alb_forwarding_rule" {
@@ -394,7 +409,7 @@ locals {
   # (README §9 — needed for the cert to have at least one always-present
   # domain independent of clients.yaml) plus one entry per client.
   cert_domains = merge(
-    { "_platform_anchor" = "saas-dev.nomowsoft.com" },
+    { "platform-anchor" = "saas-dev.nomowsoft.com" },
     local.client_effective_domain,
   )
   # for_each source for the Certificate Manager resources — empty (and
@@ -427,6 +442,8 @@ resource "google_certificate_manager_dns_authorization" "tenant" {
   name     = "dns-auth-${each.key}"
   project  = var.gcp_project
   domain   = each.value
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_certificate_manager_certificate" "tenant" {
@@ -444,6 +461,8 @@ resource "google_certificate_manager_certificate_map" "default" {
   count   = var.enable_certificate_manager ? 1 : 0
   name    = "odoo-cert-map"
   project = var.gcp_project
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_certificate_manager_certificate_map_entry" "tenant" {
@@ -478,6 +497,8 @@ resource "google_secret_manager_secret" "shared_db_password" {
       }
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_secret_manager_secret_version" "shared_db_password" {
@@ -515,6 +536,8 @@ resource "google_secret_manager_secret" "tenant_db_password" {
       }
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_secret_manager_secret_version" "tenant_db_password" {
@@ -539,6 +562,8 @@ resource "google_secret_manager_secret" "shared_admin_password" {
       }
     }
   }
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_secret_manager_secret_version" "shared_admin_password" {
@@ -763,6 +788,8 @@ resource "google_cloud_tasks_queue" "heavy_ops" {
   location = var.region
   project  = var.gcp_project
 
+  depends_on = [google_project_service.apis]
+
   rate_limits {
     max_concurrent_dispatches = 2
     max_dispatches_per_second = 1
@@ -782,6 +809,8 @@ resource "google_service_account" "fleet_migrator" {
   account_id   = "odoo-fleet-migrator"
   display_name = "Odoo fleet migration workflow"
   project      = var.gcp_project
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_project_iam_member" "fleet_migrator_run" {
@@ -850,6 +879,8 @@ resource "google_iam_workload_identity_pool" "github_actions" {
   project                   = var.gcp_project
   display_name              = "GitHub Actions"
   description               = "OIDC federation for this repo's CI/CD workflows (deploy-fleet)"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_iam_workload_identity_pool_provider" "github_actions" {
@@ -941,6 +972,8 @@ resource "google_storage_bucket" "cloudbuild_source" {
   project                     = var.gcp_project
   location                    = var.region
   uniform_bucket_level_access = true
+
+  depends_on = [google_project_service.apis]
 
   # Source archives are only needed for the duration of a build; do not let
   # this grow unbounded.
