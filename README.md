@@ -10,7 +10,7 @@ That means selling a customer a new addon is just a config change — we never
 need to rebuild and redeploy the image. The architecture closes eight classes
 of risk common to multi-tenant SaaS platforms (see the [Design decisions](#15-design-decisions--how-each-risk-is-handled) reference).
 
-Full diagram: [`docs/architecture.png`](docs/architecture.png)
+![Architecture diagram](docs/architecture.png)
 
 ```
 Internet → tenant domains (acme.nomowsoft.com, beta.nomowsoft.com, ...)
