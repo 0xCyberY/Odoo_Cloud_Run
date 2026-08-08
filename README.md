@@ -844,8 +844,8 @@ gcloud auth application-default set-quota-project $PROJECT
 
 ```bash
 gcloud services enable \
-  compute.googleapis.com run.googleapis.com sqladmin.googleapis.com \
-  redis.googleapis.com servicenetworking.googleapis.com \
+  cloudresourcemanager.googleapis.com compute.googleapis.com run.googleapis.com \
+  sqladmin.googleapis.com redis.googleapis.com servicenetworking.googleapis.com \
   artifactregistry.googleapis.com secretmanager.googleapis.com \
   cloudbuild.googleapis.com workflows.googleapis.com cloudtasks.googleapis.com \
   monitoring.googleapis.com logging.googleapis.com storage.googleapis.com \
@@ -854,17 +854,19 @@ gcloud services enable \
 
 Give it a minute after this returns — API activation is eventually consistent.
 
-> **ℹ️ Note:** this manual step only exists to get Phase 2's storage bucket
-> working — Terraform needs `storage.googleapis.com` turned on before it can
-> even start up and connect to its own state storage, and Terraform can't
-> turn that on for itself first (a chicken-and-egg problem). Every API on
-> this list is also declared in `terraform/shared/apis.tf`, and Terraform is
-> set up to enable them itself as needed — so once Phase 2 is done,
-> `terraform apply` will automatically fix a project that's missing one of
-> these APIs, without you needing to remember this list. If you skip this
-> whole list and jump straight to Phase 2, the only thing that will actually
-> fail is `storage.googleapis.com` — nothing else is needed until Terraform
-> starts running.
+> **ℹ️ Note:** this manual step only exists to bootstrap two APIs Terraform
+> can't self-heal: `storage.googleapis.com`, needed before Terraform can even
+> connect to its own state bucket (Phase 2), and
+> `cloudresourcemanager.googleapis.com`, which the google provider calls
+> into to resolve the project for virtually every project-scoped resource —
+> including the very `google_project_service` resource that would otherwise
+> self-heal a missing API. Both are chicken-and-egg: Terraform can't turn
+> them on for itself first. Every other API on this list is also declared in
+> `terraform/shared/apis.tf`, and Terraform enables those itself as needed —
+> so once Phase 2 is done, `terraform apply` will automatically fix a
+> project missing one of the rest, without you needing to remember this
+> list. If you skip this whole list and jump straight to Phase 2, the only
+> things that will actually fail are those same two.
 >
 > **A real problem this caused (2026-08-08):** after moving to a new
 > project, this list was run once, but `certificatemanager.googleapis.com`
@@ -876,6 +878,20 @@ Give it a minute after this returns — API activation is eventually consistent.
 > API a future change needs just gets added to one list there, and Terraform
 > enables it automatically the next time you apply, instead of relying on
 > someone remembering to update this README and run a command by hand.
+>
+> **A second, sneakier one (2026-08-10):** `cloudresourcemanager.googleapis.com`
+> was never enabled on this project — every `google_project_service` and
+> `google_project_iam_member` resource depends on it — but this stayed
+> invisible for weeks because a local human session's `terraform apply`
+> succeeded anyway: without an explicit `user_project_override`/
+> `billing_project` on the provider (`providers.tf`), those calls were
+> silently billed against whatever project the human's own ADC quota-project
+> setting happened to point at, which had it enabled. CI's Workload Identity
+> Federation credentials have no such fallback and failed consistently,
+> which is what actually surfaced it. Fixed both ends: enabled the API, and
+> pinned `user_project_override = true` / `billing_project = var.gcp_project`
+> on both provider blocks so local and CI now behave identically instead of
+> a gap like this only showing up for one of them.
 
 ### Phase 2 — Terraform state bucket (one time)
 
