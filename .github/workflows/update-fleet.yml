@@ -91,10 +91,29 @@ jobs:
           gcloud artifacts docker tags add \
             "${IMG}/pgbouncer:${TAG}" "${IMG}/pgbouncer:latest"
 
-      - name: Smoke test — platform modules install cleanly (Fix #6)
+      - name: Smoke test — platform modules + full catalog install cleanly (Fix #6)
+        # Installing only the fixed platform baseline here missed a real bug:
+        # the "common" catalog repo's token_apis module imports pyjwt, which
+        # was never in the Dockerfile's pip list — invisible to this smoke
+        # test (which never installed any catalog module) until a real
+        # tenant onboarding actually loaded it and crashed with
+        # ModuleNotFoundError. The whole point of the "one image, full
+        # catalog" design (§2) is that ANY tenant can end up installing ANY
+        # catalog module, so this smoke test now discovers and installs
+        # every module across every catalog repo baked into the image
+        # (/mnt/custom-shared/*), not just the platform baseline.
         run: |
           IMG="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/odoo-pooled:${{ steps.meta.outputs.sha_tag }}"
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" -q
+          CATALOG_MODULES=$(docker run --rm --entrypoint python3 "${IMG}" -c "
+          import os, glob
+          mods = set()
+          for base in glob.glob('/mnt/custom-shared/*/'):
+              for m in os.listdir(base):
+                  if os.path.isfile(os.path.join(base, m, '__manifest__.py')):
+                      mods.add(m)
+          print(','.join(sorted(mods)))
+          ")
           docker network create smoke
           docker run -d --name pg --network smoke \
             -e POSTGRES_USER=odoo -e POSTGRES_PASSWORD=odoo -e POSTGRES_DB=postgres \
@@ -103,7 +122,7 @@ jobs:
           docker run --rm --network smoke \
             -e DB_HOST=pg -e DB_PORT=5432 -e DB_USER=odoo -e DB_PASSWORD=odoo \
             "${IMG}" \
-            -d smoke -i base,session_redis,fs_storage,fs_attachment,gcs_attachment_default,addon_entitlement \
+            -d smoke -i "base,session_redis,fs_storage,fs_attachment,gcs_attachment_default,addon_entitlement,${CATALOG_MODULES}" \
             --stop-after-init
           docker rm -f pg && docker network rm smoke
 

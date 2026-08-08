@@ -15,6 +15,13 @@ USER root
 # attribute 'GEN_EMAIL'"), which kills Odoo's base module. Installing pyopenssl
 # from pip keeps the pyOpenSSL↔cryptography pair consistent in /usr/local.
 # pandas<3: pandas 3.0 has breaking API changes; stay on 2.x until addons are tested.
+# pyjwt: the "common" catalog repo's token_apis module imports it directly
+# (not an Odoo dependency the manifest declares) — missing entirely from
+# this list until a tenant onboarding actually exercised that module's load
+# path and crashed with ModuleNotFoundError: No module named 'jwt'. Client
+# catalog content (build-addons/, stage 2) isn't present yet when this
+# stage's build-time assertions run, so this class of gap isn't caught at
+# build time — only by actually installing the module. See README §16.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         postgresql-client \
@@ -30,7 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         numpy \
         openpyxl \
         xlrd \
-        xlwt
+        xlwt \
+        pyjwt
 
 # Platform modules (public repos, no token required):
 #   session_redis            (camptocamp/odoo-cloud-platform) — sessions in Memorystore Redis
