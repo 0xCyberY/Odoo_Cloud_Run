@@ -1043,6 +1043,18 @@ resource "google_project_iam_member" "github_actions_deployer_iam_sa_admin" {
   member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
 
+# google_iam_workload_identity_pool/_provider (below) are themselves
+# Terraform-managed by this same file — the pool this SA authenticates
+# THROUGH. serviceAccountAdmin/serviceAccountUser don't cover reading or
+# managing the pool/provider resources; missing this showed up as
+# "iam.workloadIdentityPools.get" denied on the very first CI apply after
+# the previous role bundle.
+resource "google_project_iam_member" "github_actions_deployer_workload_identity_pool_admin" {
+  project = var.gcp_project
+  role    = "roles/iam.workloadIdentityPoolAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
 # Broadest grant here: lets this SA assign IAM roles to other identities on
 # the project (needed because terraform/shared/main.tf itself grants roles
 # to pooled-run-sa/fleet_migrator/github_actions_deployer's own bucket and
