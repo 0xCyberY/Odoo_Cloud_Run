@@ -999,6 +999,23 @@ resource "google_storage_bucket_iam_member" "github_actions_deployer_cloudbuild_
   member = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
 
+# The Terraform state bucket (README §11 Phase 2) is created manually with
+# `gcloud storage buckets create`, never by Terraform itself — a chicken-
+# and-egg problem, same as Phase 1's API enablement: Terraform needs read/
+# write access to this exact bucket just to `init`, so that access can't be
+# granted by a `terraform apply` that hasn't been able to `init` yet. This
+# resource codifies the grant for next time (a project rebuild, a second
+# environment, ...), but the FIRST time still needs a human with bucket
+# access to run one `terraform apply` locally before CI's onboarding/
+# offboarding workflows (scripts/provision.py, scripts/destroy.py) can run
+# `terraform init` against this backend themselves. Missing this grant
+# surfaces as `storage.objects.list` "forbidden" on `terraform init`.
+resource "google_storage_bucket_iam_member" "github_actions_deployer_tf_state" {
+  bucket = "${var.gcp_project}-tf-state"
+  role   = "roles/storage.admin"
+  member = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
 # `gcloud builds submit` submits the build as github_actions_deployer, but the
 # build ITSELF executes as a separate identity — by default the project's
 # default Compute Engine SA (<project_number>-compute@developer.gserviceaccount.com).

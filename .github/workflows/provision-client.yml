@@ -98,7 +98,7 @@ jobs:
         run: python3 scripts/provision.py --client ${{ inputs.client_slug }} --init-db
 
       - name: Notify
-        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true'
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true' && secrets.SENDGRID_API_KEY != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
@@ -142,7 +142,7 @@ jobs:
           python3 scripts/onboard_client.py "${ARGS[@]}"
 
       - name: Notify DevOps/Product (manual onboarding — admin credentials for handover)
-        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false'
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false' && secrets.SENDGRID_API_KEY != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
@@ -202,7 +202,7 @@ jobs:
           python3 scripts/onboard_client.py "${ARGS[@]}"
 
       - name: Notify DevOps/Product (onboarding — admin credentials for handover)
-        if: always() && github.event_name == 'repository_dispatch'
+        if: always() && github.event_name == 'repository_dispatch' && secrets.SENDGRID_API_KEY != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net

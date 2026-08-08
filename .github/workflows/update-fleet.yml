@@ -164,7 +164,7 @@ jobs:
           done
 
       - name: Notify
-        if: always()
+        if: always() && secrets.SENDGRID_API_KEY != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net

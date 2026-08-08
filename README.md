@@ -1303,11 +1303,19 @@ above (offboarding works the same way through `destroy-client.yml`).
 **One-time external setup, before the first automated onboarding:**
 
 1. **SendGrid** (shared with the CI email setup in §10 — skip if already
-   done): sign up for the free tier, verify a sender identity, and generate
-   an API key. Set the repo secret `SENDGRID_API_KEY`, plus the repo
-   variables `NOTIFY_EMAIL_FROM` (your verified sender address) and
-   `NOTIFY_EMAIL_TO` (an internal team address — admin credentials get sent
-   here, **never** to the client directly).
+   done, or skip entirely — see below): sign up for the free tier, verify a
+   sender identity, and generate an API key. Set the repo secret
+   `SENDGRID_API_KEY`, plus the repo variables `NOTIFY_EMAIL_FROM` (your
+   verified sender address) and `NOTIFY_EMAIL_TO` (an internal team address
+   — admin credentials get sent here, **never** to the client directly).
+   **Optional**: every "Notify" step across `provision-client.yml` and
+   `update-fleet.yml` is gated on `secrets.SENDGRID_API_KEY != ''`, so if
+   you don't have a SendGrid account (or any SMTP provider) yet, just leave
+   that secret unset — the step is skipped cleanly instead of failing the
+   run. The tradeoff: without it, admin credentials from an automated
+   onboarding only ever appear in the workflow run's own logs (masked with
+   `::add-mask::`, but still — treat that log as sensitive), and you get no
+   failure notification if a run breaks.
 2. **A fine-grained access token**: scoped to only this repo, with just
    `Contents: read and write` permission. Whoever runs
    onboarding/offboarding needs this token — it's what's used to trigger the
