@@ -41,6 +41,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `secrets` isn't a valid context inside `if:` (GitHub only allows
+      # github/needs/vars/inputs/env/steps there) — compute it into a step
+      # output first so the Notify step below can check
+      # steps.sendgrid.outputs.configured instead.
+      - name: Check whether SendGrid is configured
+        id: sendgrid
+        env:
+          SENDGRID_KEY: ${{ secrets.SENDGRID_API_KEY }}
+        run: echo "configured=$([ -n "$SENDGRID_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -174,7 +184,7 @@ jobs:
           done
 
       - name: Notify
-        if: always() && secrets.SENDGRID_API_KEY != ''
+        if: always() && steps.sendgrid.outputs.configured == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net

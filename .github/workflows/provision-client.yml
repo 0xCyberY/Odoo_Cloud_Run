@@ -66,6 +66,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `secrets` isn't a valid context inside `if:` (GitHub only allows
+      # github/needs/vars/inputs/env/steps there) — compute it into a step
+      # output first so the Notify steps below can check
+      # steps.sendgrid.outputs.configured instead.
+      - name: Check whether SendGrid is configured
+        id: sendgrid
+        env:
+          SENDGRID_KEY: ${{ secrets.SENDGRID_API_KEY }}
+        run: echo "configured=$([ -n "$SENDGRID_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -105,7 +115,7 @@ jobs:
         run: python3 scripts/provision.py --client "$INPUT_CLIENT_SLUG" --init-db
 
       - name: Notify
-        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true' && secrets.SENDGRID_API_KEY != ''
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true' && steps.sendgrid.outputs.configured == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
@@ -149,7 +159,7 @@ jobs:
           python3 scripts/onboard_client.py "${ARGS[@]}"
 
       - name: Notify DevOps/Product (manual onboarding — admin credentials for handover)
-        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false' && secrets.SENDGRID_API_KEY != ''
+        if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'false' && steps.sendgrid.outputs.configured == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
@@ -209,7 +219,7 @@ jobs:
           python3 scripts/onboard_client.py "${ARGS[@]}"
 
       - name: Notify DevOps/Product (onboarding — admin credentials for handover)
-        if: always() && github.event_name == 'repository_dispatch' && secrets.SENDGRID_API_KEY != ''
+        if: always() && github.event_name == 'repository_dispatch' && steps.sendgrid.outputs.configured == 'true'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.sendgrid.net
