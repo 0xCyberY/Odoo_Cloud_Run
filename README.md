@@ -1079,6 +1079,23 @@ setup). Until you've done that, a manual fleet upgrade looks like: Phase 3 →
 build a new image in Phase 4 with a new tag → run the `odoo-fleet-migration`
 workflow → shift traffic over (see §10 for the full sequence).
 
+> **ℹ️ The CI service account (`github_actions_deployer`) is highly
+> privileged, on purpose.** `provision-client.yml`/`destroy-client.yml` run
+> a full `terraform apply`/`destroy` on `terraform/shared` on every
+> onboarding/offboarding — not just the `gcloud` calls `update-fleet.yml`
+> makes — so this identity holds project-wide admin roles across nearly
+> every service the platform touches (Compute, Cloud SQL, Redis,
+> Certificate Manager, Cloud Tasks, Workflows, Secret Manager, Artifact
+> Registry, IAM), including `roles/resourcemanager.projectIamAdmin` — the
+> ability to grant IAM roles to *any* identity on the project, needed
+> because `terraform/shared/main.tf` itself grants roles to other service
+> accounts (`pooled-run-sa`, `fleet_migrator`, etc.). That's real elevated
+> trust in a workload-identity-federated CI account; it's bounded by the
+> WIF `attribute_condition` (§9-adjacent, `google_iam_workload_identity_pool_provider`)
+> restricting it to workflow runs **from this exact repo** — i.e. whoever
+> already has push/dispatch access here — not a new trust boundary on top
+> of that, but worth knowing before granting repo write access to anyone.
+
 ### Optional maintenance (not required to run)
 
 A toolbox for a platform that's already up and running, not setup steps —

@@ -916,13 +916,28 @@ resource "google_service_account_iam_member" "github_actions_wif_binding" {
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_actions.name}/attribute.repository/${var.github_repo}"
 }
 
-# Roles actually exercised by deploy-fleet.yml:
+# Roles exercised by update-fleet.yml (gcloud-only, no terraform):
 #   cloudbuild.builds.editor  — gcloud builds submit
 #   artifactregistry.writer   — gcloud artifacts docker tags add
 #   run.admin                 — gcloud run services/jobs update, jobs execute
 #   iam.serviceAccountUser    — act as pooled-run-sa/websocket-run-sa/
 #                                cron-runner-run-sa when updating their revisions
 #   workflows.invoker         — gcloud workflows run odoo-fleet-migration
+#
+# This same identity is ALSO used by provision-client.yml/destroy-client.yml
+# (scripts/provision.py / destroy.py), which run a full `terraform apply`/
+# `destroy` on terraform/shared on every onboarding/offboarding — not just
+# the gcloud calls above. terraform/shared/main.tf touches nearly every
+# service on the platform (VPC/LB/Armor, Cloud SQL, Redis, Certificate
+# Manager, Cloud Tasks, Workflows, Secret Manager, Artifact Registry, IAM
+# grants to other SAs), so the roles below are broader than update-fleet.yml
+# alone needs. In particular roles/resourcemanager.projectIamAdmin lets this
+# SA grant IAM roles to ANY identity on the project — required because
+# terraform/shared/main.tf itself grants roles to pooled-run-sa/
+# fleet_migrator/etc. (google_project_iam_member resources throughout this
+# file). That's real elevated trust, bounded only by WIF's attribute_condition
+# restricting it to workflow runs FROM var.github_repo (above) — i.e. whoever
+# can trigger a workflow_dispatch/repository_dispatch on this exact repo.
 resource "google_project_iam_member" "github_actions_deployer_cloudbuild" {
   project = var.gcp_project
   role    = "roles/cloudbuild.builds.editor"
@@ -956,6 +971,85 @@ resource "google_project_iam_member" "github_actions_deployer_sa_user" {
 resource "google_project_iam_member" "github_actions_deployer_workflows" {
   project = var.gcp_project
   role    = "roles/workflows.invoker"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+# Roles needed for `terraform apply`/`destroy` on terraform/shared and the
+# per-tenant workspace (provision-client.yml/destroy-client.yml), covering
+# every resource type either config manages — see the comment block above.
+resource "google_project_iam_member" "github_actions_deployer_workflows_editor" {
+  project = var.gcp_project
+  role    = "roles/workflows.editor"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_compute" {
+  project = var.gcp_project
+  role    = "roles/compute.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_servicenetworking" {
+  project = var.gcp_project
+  role    = "roles/servicenetworking.networksAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_cloudsql" {
+  project = var.gcp_project
+  role    = "roles/cloudsql.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_redis" {
+  project = var.gcp_project
+  role    = "roles/redis.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_certificatemanager" {
+  project = var.gcp_project
+  role    = "roles/certificatemanager.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_cloudtasks" {
+  project = var.gcp_project
+  role    = "roles/cloudtasks.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_secretmanager" {
+  project = var.gcp_project
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_storage" {
+  project = var.gcp_project
+  role    = "roles/storage.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_artifactregistry_admin" {
+  project = var.gcp_project
+  role    = "roles/artifactregistry.admin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+resource "google_project_iam_member" "github_actions_deployer_iam_sa_admin" {
+  project = var.gcp_project
+  role    = "roles/iam.serviceAccountAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
+}
+
+# Broadest grant here: lets this SA assign IAM roles to other identities on
+# the project (needed because terraform/shared/main.tf itself grants roles
+# to pooled-run-sa/fleet_migrator/github_actions_deployer's own bucket and
+# secret bindings/etc.) — see the comment block above for the trust tradeoff.
+resource "google_project_iam_member" "github_actions_deployer_project_iam_admin" {
+  project = var.gcp_project
+  role    = "roles/resourcemanager.projectIamAdmin"
   member  = "serviceAccount:${google_service_account.github_actions_deployer.email}"
 }
 
