@@ -93,6 +93,10 @@ class CloudRunDestroyer:
         self.tf_state_bucket = f"{self.gcp_project}-tf-state"
 
     def _sync_adc_quota_project(self):
+        # Skipped under Workload Identity Federation (CI) — see the matching
+        # docstring in provision.py's _sync_adc_quota_project for why.
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            return
         run_cmd(
             ["gcloud", "auth", "application-default", "set-quota-project", self.gcp_project],
             capture_output=False,

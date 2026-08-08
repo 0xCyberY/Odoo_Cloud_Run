@@ -46,7 +46,14 @@ fi
 # application-default login` on a different project) causes a confusing
 # "billing account not in good standing" error that has nothing to do with
 # the actual target project's billing. Keep it in sync on every invocation.
-gcloud auth application-default set-quota-project "$PROJECT" >/dev/null
+# Skipped when GOOGLE_APPLICATION_CREDENTIALS is set (Workload Identity
+# Federation, e.g. CI) — that's a credentials file, not a human ADC login
+# session, so there's no cross-run quota-project drift to fix, and the
+# command itself fails there with "Application default credentials have
+# not been set up".
+if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  gcloud auth application-default set-quota-project "$PROJECT" >/dev/null
+fi
 
 export TF_VAR_gcp_project="$PROJECT"
 

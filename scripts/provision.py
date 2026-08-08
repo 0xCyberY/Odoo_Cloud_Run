@@ -109,7 +109,18 @@ class CloudRunProvisioner:
         over from a previous `gcloud auth application-default login` on a
         different project) causes a confusing "billing account not in good
         standing" error unrelated to self.gcp_project's actual billing state.
+
+        Skipped when GOOGLE_APPLICATION_CREDENTIALS is set — that means
+        we're authenticated via a credentials file (Workload Identity
+        Federation in CI, google-github-actions/auth) rather than a human's
+        `gcloud auth application-default login` session. There's no
+        cross-run ADC quota-project drift to fix in that case (each CI run
+        is a fresh runner with no prior login), and `set-quota-project`
+        itself fails there with "Application default credentials have not
+        been set up" since that file was never created.
         """
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            return
         run_cmd(
             ["gcloud", "auth", "application-default", "set-quota-project", self.gcp_project],
             capture_output=False,
@@ -117,8 +128,8 @@ class CloudRunProvisioner:
 
     def execute_shared_terraform(self):
         """Applies terraform/shared first: tenant SQL user + password secret,
-        pgbouncer credential map, SSL certificate domains, and uptime checks all
-        derive from clients.yaml and must exist before the tenant workspace."""
+        pgbouncer credential map, and SSL certificate domains all derive from
+        clients.yaml and must exist before the tenant workspace."""
         log_info("--- Step 1: Applying shared infrastructure (clients.yaml driven) ---")
 
         shared_dir = os.path.join(
