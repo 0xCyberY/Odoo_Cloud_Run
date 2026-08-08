@@ -115,10 +115,20 @@ jobs:
           done
 
       - name: Migrate tenants sequentially (Cloud Workflows, halt-on-fail)
+        # $START_FROM via env:, not a raw ${{ }} expression spliced into the
+        # JSON literal in the script body — start_from is a free-text
+        # workflow_dispatch input, and ${{ }} substitutes as literal text
+        # before bash parses it (a quote in the input would break out of the
+        # surrounding single-quoted --data string). Built with python for
+        # proper JSON escaping, same as the tenants list above.
+        env:
+          TENANTS_JSON: ${{ steps.meta.outputs.tenants }}
+          START_FROM: ${{ inputs.start_from }}
         run: |
+          DATA=$(python3 -c 'import json, os; print(json.dumps({"tenants": json.loads(os.environ["TENANTS_JSON"]), "start_from": os.environ.get("START_FROM", "")}))')
           gcloud workflows run odoo-fleet-migration \
             --location "${REGION}" --project "${PROJECT}" \
-            --data '{"tenants": ${{ steps.meta.outputs.tenants }}, "start_from": "${{ inputs.start_from }}"}'
+            --data "$DATA"
 
       - name: Gradual traffic shift with health gates (10% → 50% → 100%)
         run: |

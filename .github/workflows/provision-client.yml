@@ -95,7 +95,14 @@ jobs:
 
       - name: Provision client (existing entry — shared infra, terraform, DB init)
         if: github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true'
-        run: python3 scripts/provision.py --client ${{ inputs.client_slug }} --init-db
+        # $CLIENT_SLUG via env:, not a raw ${{ }} expression in the script
+        # body — same script-injection reasoning as the repository_dispatch
+        # steps below: ${{ }} substitutes as literal text before bash parses
+        # it, and workflow_dispatch inputs are free-text anyone with
+        # Actions-trigger access can fill in.
+        env:
+          INPUT_CLIENT_SLUG: ${{ inputs.client_slug }}
+        run: python3 scripts/provision.py --client "$INPUT_CLIENT_SLUG" --init-db
 
       - name: Notify
         if: always() && github.event_name == 'workflow_dispatch' && steps.check_client.outputs.exists == 'true' && secrets.SENDGRID_API_KEY != ''
