@@ -1298,8 +1298,18 @@ gcloud run jobs execute zed-corp-odoo-job-migration --region $REGION --wait \
   --args="-d,zed,-i,<module_name>,--stop-after-init"
 ```
 
-To install several modules at once, comma-separate them after `-i`:
-`-d,zed,-i,mod_a,mod_b,--stop-after-init`.
+To install several modules at once, **don't** just comma-separate them
+after `-i` — `gcloud`'s default `--args` delimiter is also `,`, so
+`-d,zed,-i,mod_a,mod_b,--stop-after-init` splits `mod_a` and `mod_b` into
+two separate arguments instead of one `-i` value, and Odoo rejects `mod_b`
+as an unrecognized parameter (only `mod_a` gets installed). Switch
+`--args` to a different delimiter instead, so the comma-joined module list
+survives as a single value:
+
+```bash
+gcloud run jobs execute zed-corp-odoo-job-migration --region $REGION --wait \
+  --args="^@^-d@zed@-i@mod_a,mod_b@--stop-after-init"
+```
 
 ### Selling an addon to an EXISTING client
 
@@ -1607,6 +1617,9 @@ the hard way again, on this project or any future one.
 | Odoo dedups `ir.attachment` by content checksum — rewriting a menu icon whose bytes are byte-identical to before (core module icons never change) reuses the **existing** `store_fname`, even if that file no longer exists, instead of writing fresh | icon `write()`'d successfully (no error) but still 404s | `DELETE` the stale `ir_attachment` row first so there's no checksum collision, *then* re-trigger the write — see §17 |
 | `odoo -i base` does **not** install the `web` client — a tenant provisioned without it 500s on `/web/login` (`External ID not found: web.login`) | login page 500 on a "successfully" provisioned tenant | init job installs `base,web,...` (`terraform/main.tf`) |
 | `gcloud builds submit odoo-v18/` falls back to the repo `.gitignore` (which excludes `build-addons/`) when no `.gcloudignore` exists → image ships with an **empty addon catalog** | tenants' custom modules missing at runtime | `odoo-v18/.gcloudignore` explicitly keeps `build-addons/` in the upload |
+| `gcloud run jobs execute --args=` defaults to splitting on `,` — same character Odoo's `-i` flag needs *within* its own value (a comma-joined module list). A dynamically-built module list (`onboard_client.py`'s combined auto-install list) gets shredded into separate argv elements, so Odoo only sees the first module after `-i` and rejects the rest | `odoo server: error: unrecognized parameters: 'web gcs_attachment_default ...'` — init job fails, only the first `-i` module would have installed | `onboard_client.py`'s `run_init_job` uses a custom `^@^` args delimiter (README §17's `^\|^` technique) so the module list's internal commas survive as one value; §12 Step 8's "install several modules" example fixed the same way |
+| `google_iam_workload_identity_pool`/`_provider` are Terraform-managed resources the CI service account authenticates *through* — `iam.serviceAccountAdmin`/`serviceAccountUser` don't cover reading or managing them | `Error 403: Permission 'iam.workloadIdentityPools.get' denied` on the very first CI apply | `github_actions_deployer` also granted `roles/iam.workloadIdentityPoolAdmin` |
+| The `google` provider had no explicit `user_project_override`/`billing_project` — Cloud Resource Manager calls (backing `google_project_iam_member`/`google_project_service`) silently billed against whatever project a human's ADC quota-project setting pointed at, masking that `cloudresourcemanager.googleapis.com` was never actually enabled on the target project. CI's WIF credentials have no such fallback | `Error 403: Cloud Resource Manager API has not been used ... or it is disabled` — only in CI, not from a local human session, on the exact same resources | `cloudresourcemanager.googleapis.com` enabled + added to `apis.tf`; both provider blocks pin `user_project_override = true` / `billing_project = var.gcp_project` so local and CI behave identically |
 | Renaming a client's `database` in clients.yaml/tfvars → `terraform plan` shows `google_sql_database.client must be replaced` (name is ForceNew) = **DESTROY the live tenant DB** | data loss on a "rename" | never plain-apply; rename in place (`ALTER DATABASE` in-VPC) + `terraform state rm`/`import`, per §13 |
 
 ---

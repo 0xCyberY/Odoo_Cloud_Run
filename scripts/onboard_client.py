@@ -316,10 +316,19 @@ class ClientOnboarder:
             log_info("[DRY-RUN] Would execute init job with the above -i list")
             return
         job_name = f"{self.client_slug}-odoo-job-init"
+        # gcloud's default --args delimiter is ",", same as the separator
+        # Odoo's own -i flag expects WITHIN its single value (a comma-joined
+        # module list) — with the default delimiter, gcloud splits that list
+        # into separate argv elements instead of one value, so Odoo only
+        # ever sees the first module after -i and rejects the rest as
+        # unrecognized positional args. "^@^" switches gcloud's delimiter to
+        # "@" so the comma-joined module list survives as one element (same
+        # technique as the "^|^" custom delimiter documented in README §17
+        # for comma-containing payloads).
         run_cmd([
             "gcloud", "run", "jobs", "execute", job_name,
             f"--region={self.region}", f"--project={self.gcp_project}",
-            f"--args=-d,{self.database},-i,{','.join(modules)},--without-demo=all,--stop-after-init",
+            f"--args=^@^-d@{self.database}@-i@{','.join(modules)}@--without-demo=all@--stop-after-init",
             "--wait",
         ], capture_output=False)
         log_success("Init job completed with combined auto-install list.")
