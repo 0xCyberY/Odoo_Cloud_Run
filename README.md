@@ -204,6 +204,52 @@ The entrypoint script automatically finds every folder under
 requires touching the Dockerfile or the entrypoint script. The next build
 just picks it up.
 
+### Catalog modules' Python dependencies — why they're all baked in
+
+The Dockerfile also installs a set of Python packages that no Odoo core
+module needs — they exist purely because specific modules *inside the
+catalog repos* (`build-addons/`, cloned from `common`/Human-Resources/etc.)
+import them directly or declare them in `external_dependencies.python`.
+None of this is visible until a tenant actually installs the module that
+needs it — see the §16 gotcha row for how this was discovered the hard way.
+
+| Package | Needed by | What it's for |
+|---|---|---|
+| `pyjwt` | `common/token_apis` | Encoding/decoding JWTs for the `nomow_hr*` API auth flow (`decode_token`, `parse_bearer_authorization`) |
+| `pyparsing` | `common/token_apis` | Same file — a `from pyparsing import Any` that only works because pyparsing happens to re-export `typing.Any` (looks like a copy-paste bug in the vendor code, not intentional use of pyparsing) |
+| `firebase-admin` | `Human-Resources/notification_firebase` | Sending push notifications via Firebase Cloud Messaging |
+| `gtts` (manifest declares it as `gTTS`) | `common/ks_dashboard_ninja` | Google Text-to-Speech, likely a dashboard/reporting voice feature |
+| `SQLAlchemy` | `common/ks_dashboard_ninja` | Manifest-declared `external_dependencies`; this dashboard module talks to its data sources through SQLAlchemy |
+| `guardrails-ai` (imports as `guardrails`) | `common/odoo_ai` | AI output validation/guardrails for whatever LLM integration `odoo_ai` provides |
+| `pydantic` | `common/odoo_ai` | Data validation, almost certainly a dependency of the AI integration's request/response schemas |
+| `tabulate` | `common/odoo_ai` | Formatting tabular data, likely for AI-generated report output |
+| `pyncclient` (imports as `nextcloud_client`) | `common/auto_database_backup` | Uploading DB backups to a Nextcloud instance |
+| `nextcloud-api-wrapper` | `common/auto_database_backup` | A second, *different* Nextcloud package the manifest also declares in `external_dependencies` — Odoo validates that exact name via `importlib.metadata.version()` before install, independent of what the code actually imports (`nextcloud_client`, from `pyncclient` above). Needed purely to satisfy the manifest check |
+| `boto3` | `common/auto_database_backup` | Uploading DB backups to AWS S3 |
+| `dropbox` | `common/auto_database_backup` | Uploading DB backups to Dropbox |
+| `paramiko` | `common/auto_database_backup` | Uploading DB backups over SFTP |
+| `odoo-test-helper` | `common/date_range` | A small testing utility for Odoo module test suites (fake model loading) |
+
+`auto_database_backup` alone accounts for 5 of the 14 — it supports
+multiple backup destinations (S3, Dropbox, Nextcloud via two different
+packages, SFTP) and imports/declares all of them unconditionally rather
+than lazily per configured destination.
+
+Not currently installed, and not required: `Human-Resources/nomow_hr_zk_attendance`
+imports `zk` (the `pyzk` package, for ZKTeco biometric attendance devices)
+wrapped in `try/except ImportError`, logging an error and continuing rather
+than crashing. That module's biometric-device feature won't work without
+`pyzk`, but nothing else breaks — add it if that feature is ever needed.
+
+Why every module's dependencies have to be here, not just the ones a
+client currently uses: `pooled-odoo`, `websocket-odoo`, and
+`cron-runner-odoo` are shared processes serving every tenant's database
+from the same Python interpreter — there's no per-tenant environment. The
+platform's whole design (this section) is "selling an addon is a config
+change, never an image rebuild" — if a package weren't here, that promise
+breaks the first time any client gets entitled to the module needing it,
+turning a routine entitlement change back into an emergency rebuild.
+
 ### Segregation model — entitlements enforced at runtime
 
 The image contains the whole catalog of addons, for every customer. What
@@ -1620,7 +1666,7 @@ the hard way again, on this project or any future one.
 | `gcloud run jobs execute --args=` defaults to splitting on `,` — same character Odoo's `-i` flag needs *within* its own value (a comma-joined module list). A dynamically-built module list (`onboard_client.py`'s combined auto-install list) gets shredded into separate argv elements, so Odoo only sees the first module after `-i` and rejects the rest | `odoo server: error: unrecognized parameters: 'web gcs_attachment_default ...'` — init job fails, only the first `-i` module would have installed | `onboard_client.py`'s `run_init_job` uses a custom `^@^` args delimiter (README §17's `^\|^` technique) so the module list's internal commas survive as one value; §12 Step 8's "install several modules" example fixed the same way |
 | `google_iam_workload_identity_pool`/`_provider` are Terraform-managed resources the CI service account authenticates *through* — `iam.serviceAccountAdmin`/`serviceAccountUser` don't cover reading or managing them | `Error 403: Permission 'iam.workloadIdentityPools.get' denied` on the very first CI apply | `github_actions_deployer` also granted `roles/iam.workloadIdentityPoolAdmin` |
 | The `google` provider had no explicit `user_project_override`/`billing_project` — Cloud Resource Manager calls (backing `google_project_iam_member`/`google_project_service`) silently billed against whatever project a human's ADC quota-project setting pointed at, masking that `cloudresourcemanager.googleapis.com` was never actually enabled on the target project. CI's WIF credentials have no such fallback | `Error 403: Cloud Resource Manager API has not been used ... or it is disabled` — only in CI, not from a local human session, on the exact same resources | `cloudresourcemanager.googleapis.com` enabled + added to `apis.tf`; both provider blocks pin `user_project_override = true` / `billing_project = var.gcp_project` so local and CI behave identically |
-| The `update-fleet.yml` smoke test only ever installed the fixed 6-module platform baseline, never any actual catalog content — so an undeclared Python dependency in a catalog repo (the "common" repo's `token_apis` imports `pyjwt`, never in the Dockerfile's pip list) was invisible to CI and only surfaced when a real tenant onboarding tried to install it | `ModuleNotFoundError: No module named 'jwt'` mid-install, tenant init job fails after already creating real infra (database, bucket, jobs) | `pyjwt` added to the Dockerfile; the smoke test now discovers and installs every module across every catalog repo baked into the image (`/mnt/custom-shared/*`), not just the baseline — matches the "one image, full catalog, any tenant can install any of it" design (§2) |
+| The `update-fleet.yml` smoke test only ever installed the fixed 6-module platform baseline, never any actual catalog content — so undeclared Python dependencies in catalog repos (14 packages across `token_apis`, `odoo_ai`, `auto_database_backup`, `ks_dashboard_ninja`, `notification_firebase`, `date_range` — full table in §2) were invisible to CI and only surfaced when a real tenant onboarding tried to install them | `ModuleNotFoundError: No module named 'jwt'`, then `'pyparsing'`, then a manifest `external_dependencies` failure on `SQLAlchemy` — three separate rebuild cycles before the whole set was found; tenant init job fails after already creating real infra (database, bucket, jobs) | All 14 packages added to the Dockerfile (§2 has the full per-package attribution); found by diffing every catalog-wide import *and* every manifest's declared `external_dependencies` against the image's actual installed packages, not by waiting for each one to crash individually. Verified via a throwaway Cloud Run Job installing the tenant's exact module list with `ODOO_ENTITLEMENT_BYPASS=1` (§17 pattern) before touching real tenant jobs. The smoke test itself now discovers and installs every module across every catalog repo (`/mnt/custom-shared/*`), not just the baseline — matches the "one image, full catalog, any tenant can install any of it" design (§2) — though installing literally everything at once can surface unrelated inter-module bugs (a `muk_web_dialog` view referencing a field only a missing dependency would add) that don't block any real tenant; treat those as separate vendor-repo issues, not blockers |
 | Renaming a client's `database` in clients.yaml/tfvars → `terraform plan` shows `google_sql_database.client must be replaced` (name is ForceNew) = **DESTROY the live tenant DB** | data loss on a "rename" | never plain-apply; rename in place (`ALTER DATABASE` in-VPC) + `terraform state rm`/`import`, per §13 |
 
 ---

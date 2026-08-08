@@ -15,13 +15,27 @@ USER root
 # attribute 'GEN_EMAIL'"), which kills Odoo's base module. Installing pyopenssl
 # from pip keeps the pyOpenSSL↔cryptography pair consistent in /usr/local.
 # pandas<3: pandas 3.0 has breaking API changes; stay on 2.x until addons are tested.
-# pyjwt: the "common" catalog repo's token_apis module imports it directly
-# (not an Odoo dependency the manifest declares) — missing entirely from
-# this list until a tenant onboarding actually exercised that module's load
-# path and crashed with ModuleNotFoundError: No module named 'jwt'. Client
-# catalog content (build-addons/, stage 2) isn't present yet when this
-# stage's build-time assertions run, so this class of gap isn't caught at
-# build time — only by actually installing the module. See README §16.
+# pyjwt onward (through SQLAlchemy below): catalog-repo modules need these —
+# either imported directly in code, or declared in a manifest's
+# `external_dependencies.python` (which Odoo checks via
+# importlib.metadata.version(name) against the EXACT declared string before
+# even importing the module, independent of whatever the code actually
+# imports — e.g. auto_database_backup's manifest declares both
+# "nextcloud-api-wrapper" AND "pyncclient", but its code only ever imports
+# `nextcloud_client`, which pyncclient provides; nextcloud-api-wrapper is
+# needed purely to satisfy the manifest check). None of this is caught at
+# build time — client catalog content (build-addons/, stage 2) isn't
+# present yet when this stage's build-time assertions run. First surfaced
+# as ModuleNotFoundError: No module named 'jwt' during a real tenant
+# onboarding, then 'pyparsing' on the next attempt; the rest were found in
+# two passes — diffing every top-level import across the whole cloned
+# catalog against this image's installed packages, then parsing every
+# manifest's external_dependencies directly (the more reliable signal,
+# since Odoo validates those before an install can even start). Package
+# name vs. import/declared name differs for several of these:
+# guardrails-ai -> `guardrails`, pyncclient -> `nextcloud_client`,
+# odoo-test-helper -> `odoo_test_helper`, gtts -> declared as "gTTS".
+# See README §16.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         postgresql-client \
@@ -38,7 +52,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openpyxl \
         xlrd \
         xlwt \
-        pyjwt
+        pyjwt \
+        pyparsing \
+        firebase-admin \
+        gtts \
+        guardrails-ai \
+        pyncclient \
+        nextcloud-api-wrapper \
+        odoo-test-helper \
+        pydantic \
+        tabulate \
+        boto3 \
+        dropbox \
+        paramiko \
+        SQLAlchemy
 
 # Platform modules (public repos, no token required):
 #   session_redis            (camptocamp/odoo-cloud-platform) — sessions in Memorystore Redis
